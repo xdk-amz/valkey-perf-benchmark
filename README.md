@@ -366,6 +366,8 @@ Combine with a baseline `.conf` file:
 | `custom-server-configs` | Additional server configuration options the benchmark does not manage (e.g. `{"maxmemory": "4gb", "timeout": "300"}`). | Object (key-value pairs) | No |
 | `custom-server-config-file` | Path to a Valkey-format `.conf` file passed positionally to `valkey-server`. Used as a baseline configuration. | String (path) | No |
 | `build_args` | Extra `NAME=value` variables passed to `make` when the framework builds Valkey (e.g. `["BUILD_EXT_STORAGE=yes"]`). `BUILD_TLS` is not allowed because it comes from `tls_mode`. Each name may appear once. | List of strings | No |
+| `cpu_layout` | Every CPU the server may use and what runs on each, e.g. `{"cores": 8, "layout": "main, 3x io, 3x irq, aux", "first_cpu": 1}`. Also allowed per scenario. See [CPU layout](#cpu-layout-cpu_layout). | Object | No |
+| `thread_pinning` | Legacy per-thread pinning inside `server_cpu_range`: `{"main": "2", "io_threads": "3-4", "other": "1"}`. Use `cpu_layout` instead. | Object | No |
 
 **Note on `custom-server-configs`**: This field lets you pass extra configuration options to the Valkey server at startup (e.g. `maxmemory`, `timeout`, `maxclients`, `tcp-keepalive`, `hz`), and to override a benchmark-managed default such as `maxmemory-policy`.
 
@@ -390,6 +392,66 @@ Supported commands:
 ```
 "SET", "GET", "RPUSH", "LPUSH", "LPOP", "SADD", "SPOP", "HSET", "GET", "MGET", "LRANGE", "SPOP", "ZPOPMIN"
 ```
+
+### CPU layout (`cpu_layout`)
+
+`cores` is the total number of CPUs the server may run on: main, IO
+threads, the poller, NIC IRQ and softirq work, bio/jemalloc threads and
+anything else the server needs. The old "N cores" (io-threads N) is called
+`worker_cpus` and is never shown as cores.
+
+```json
+"cpu_layout": {"cores": 8, "layout": "main, 3x io, 3x irq, aux", "first_cpu": 1}
+```
+
+The layout lists one slot per CPU, in CPU order, starting at `first_cpu`:
+`slot := [COUNT "x"] role ("+" role)*`. `+` puts several roles on one CPU.
+The slot count must equal `cores`.
+
+| Role | Runs there |
+| ---- | ---------- |
+| `main` | the main thread (exactly one) |
+| `io` | one IO thread (`io_thd_i`) per token, in order |
+| `poller` | the `io_epoll` thread; without a token it goes with the last `io` (recorded as `poller: implicit`) |
+| `irq` | NIC IRQs, spread round-robin over the irq CPUs; on loopback, RPS for `lo` |
+| `aux` | every other server thread; without a token they go to main's CPU |
+| `repl` | `repl_sender`; without a token it goes with the poller |
+| `hk` | housekeeping, on right-sized hosts only |
+
+`first_cpu` defaults to 1 when the host has more CPUs than `cores` (CPU 0
+keeps housekeeping) and 0 otherwise. The harness:
+
+- derives io-threads as 1 + the number of `io` tokens; an explicit
+  `io-threads` (top-level or in `custom-server-configs`) that disagrees is an error,
+- starts the server under `taskset -c` of every slot CPU, then pins and
+  verifies each thread,
+- places NIC IRQs (or loopback RPS) on the `irq` CPUs when running as root or
+  with passwordless sudo. The change is left in place after the run. Without
+  privileges the row records `irq_placement: not applied: ...`, and on a NIC
+  path a layout with `irq` slots marks the row invalid. A layout with no `irq`
+  slot on a NIC path is valid only when every NIC IRQ already lands on a layout CPU,
+- requires `client_cpu_range` and rejects one that overlaps the layout CPUs.
+
+`cpu_layout` replaces `server_cpu_range` and `thread_pinning` in the same
+config entry, and cannot be combined with `cpu_allocation` or
+`cluster_nodes`. A scenario may set its own `cpu_layout`; the server is
+restarted under it before the scenario runs, and the next scenario without
+one goes back to the config's.
+
+Every row from a layout run carries `cores`, `worker_cpus`,
+`cpu_layout_label` (e.g. `8 cores (main + 3 io + 3 irq + aux)`), the
+derived `io_threads`, and `cpu_layout`: the plan (`slots`, `cpus`,
+`server_config`) plus `applied` (process CPUs, each thread's CPUs, IRQ
+effective affinity, RPS, unplaced threads, problems) and `host`. The run
+manifest records the same object. Rows with layout problems are marked
+`valid: false` with the reasons.
+
+Older result files are read unchanged: `utils/ab_summary.py`,
+`utils/compare_benchmark_results.py` and `utils/push_to_postgres.py` call
+`cpu_layout.normalize_layout()`, which labels a legacy row
+`<N> worker cores (<total> CPUs total)` with `layout_legacy: true`, where N is
+its io-threads and the total comes from its `thread_pinning` CPUs or the run
+manifest's `server_cpu_range` (unknown when neither was recorded).
 
 ### Scenario-based Configurations (`test_groups`)
 
