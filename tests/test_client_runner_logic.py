@@ -1796,7 +1796,9 @@ class TestRestartReappliesConfigSet:
         with (
             patch.object(runner, "_run", return_value=MagicMock()),
             patch.object(
-                runner, "_restart_server", side_effect=lambda: calls.append("restart")
+                runner,
+                "_restart_server",
+                side_effect=lambda *a: calls.append("restart"),
             ),
             patch.object(
                 runner, "_flush_database", side_effect=lambda: calls.append("flush")

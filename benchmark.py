@@ -30,6 +30,7 @@ from valkey_benchmark import (
 from benchmark_build import BenchmarkBuilder
 from generators import DEFAULT_GENERATOR, GENERATORS
 from measurement import validate_measurement, validate_thread_pinning
+import cpu_layout
 from run_manifest import build_manifest, write_manifest
 from samplers import SOURCES
 from utils.cpu_utils import (
@@ -79,6 +80,7 @@ OPTIONAL_CONF_KEYS = [
     "generators",
     "measurement",
     "thread_pinning",
+    "cpu_layout",
 ]
 
 BUILD_ARG_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -609,6 +611,7 @@ def validate_config(cfg: dict) -> None:
         validate_measurement(cfg["measurement"])
     if "thread_pinning" in cfg:
         validate_thread_pinning(cfg["thread_pinning"])
+    validate_cpu_layout_config(cfg)
 
     if "cluster_mode" in cfg and not isinstance(cfg["cluster_mode"], list):
         cfg["cluster_mode"] = parse_bool(cfg["cluster_mode"])
@@ -676,6 +679,63 @@ def _get_active_ports(cfg: dict) -> List[int]:
     if cfg.get("cluster_mode") and "cluster_ports" in cfg:
         return cfg["cluster_ports"]
     return [cfg.get("port", 6379)]
+
+
+def _explicit_io_threads(cfg: dict) -> List[int]:
+    value = cfg.get("io-threads")
+    if value is None:
+        value = cfg.get("custom-server-configs", {}).get("io-threads")
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    return [int(v) for v in values]
+
+
+def scenario_layouts(cfg: dict):
+    """Yield (location, cpu_layout) for the config and every scenario."""
+    if "cpu_layout" in cfg:
+        yield "cpu_layout", cfg["cpu_layout"]
+    for i, group in enumerate(cfg.get("test_groups") or []):
+        if not isinstance(group, dict):
+            continue
+        for j, sc in enumerate(group.get("scenarios") or []):
+            if isinstance(sc, dict) and "cpu_layout" in sc:
+                yield f"test_groups[{i}].scenarios[{j}].cpu_layout", sc["cpu_layout"]
+
+
+def validate_cpu_layout_config(cfg: dict) -> None:
+    """Check every cpu_layout against the spec and against the rest of the config."""
+    layouts = list(scenario_layouts(cfg))
+    if not layouts:
+        return
+    for where, value in layouts:
+        cpu_layout.validate_cpu_layout(value, where)
+    for key in ("cpu_allocation", "cluster_nodes"):
+        if key in cfg:
+            raise ValueError(
+                f"'cpu_layout' places one server; it cannot be used with '{key}'"
+            )
+    if "cpu_layout" in cfg:
+        for key in ("server_cpu_range", "thread_pinning"):
+            if key in cfg:
+                raise ValueError(f"'cpu_layout' replaces '{key}'; set one or the other")
+    explicit = _explicit_io_threads(cfg)
+    for where, value in layouts:
+        derived = cpu_layout.io_threads_for(value)
+        wrong = sorted({v for v in explicit if v != derived})
+        if wrong:
+            raise ValueError(
+                f"'{where}' gives io-threads {derived} but the config sets "
+                f"io-threads {wrong}"
+            )
+    if "client_cpu_range" not in cfg:
+        raise ValueError(
+            "'cpu_layout' needs 'client_cpu_range' so the generator stays off "
+            "the layout CPUs"
+        )
+    for where, value in layouts:
+        if "first_cpu" in value:
+            cpu_layout.check_disjoint(value, [cfg["client_cpu_range"]], where)
 
 
 def validate_cpu_allocation(cfg: dict) -> None:
@@ -1012,6 +1072,8 @@ def _resolve_io_threads_list(cfg: dict) -> list:
 
     custom = cfg.get("custom-server-configs", {}).get("io-threads")
     if custom is None:
+        if "cpu_layout" in cfg:
+            return [cpu_layout.io_threads_for(cfg["cpu_layout"])]
         return [None]
     return [int(custom)]
 
@@ -1090,11 +1152,16 @@ def _execute_benchmark_run(
         server_cpu_ranges = calculate_server_cpu_ranges(cfg)
         if server_cpu_ranges:
             cfg["server_cpu_ranges"] = server_cpu_ranges
+        client_ranges = [cfg["client_cpu_range"]] if cfg.get("client_cpu_range") else []
+        for where, value in scenario_layouts(cfg):
+            cpu_layout.check_disjoint(
+                value, client_ranges + list(client_cpu_ranges), where
+            )
 
         launcher = ServerLauncher(
             results_dir=str(results_dir),
             valkey_path=str(valkey_dir),
-            cores=(
+            cpu_range=(
                 cfg.get("server_cpu_ranges", [cfg.get("server_cpu_range")])[0]
                 if cfg.get("server_cpu_ranges") or cfg.get("server_cpu_range")
                 else None
@@ -1135,7 +1202,12 @@ def _execute_benchmark_run(
 
         cfg = _with_cli_generator_paths(cfg, args)
         manifest_id = _write_run_manifest(
-            results_dir, commit_id, valkey_dir, cfg, benchmark_path
+            results_dir,
+            commit_id,
+            valkey_dir,
+            cfg,
+            benchmark_path,
+            layout=getattr(launcher, "layout_manifest", None),
         )
 
         runner = ClientRunner(
@@ -1197,7 +1269,9 @@ def _uses_generator(cfg: dict, name: str) -> bool:
     )
 
 
-def _write_run_manifest(results_dir, commit_id, valkey_dir, cfg, benchmark_path):
+def _write_run_manifest(
+    results_dir, commit_id, valkey_dir, cfg, benchmark_path, layout=None
+):
     """Record what this run executes; returns the manifest id for its rows."""
     from generators import ValkeyBenchmarkGenerator
 
@@ -1220,6 +1294,7 @@ def _write_run_manifest(results_dir, commit_id, valkey_dir, cfg, benchmark_path)
             build_args=cfg.get("build_args", []),
             generators=identities,
             cfg=cfg,
+            cpu_layout=layout,
         )
         return write_manifest(Path(results_dir), manifest)
     except Exception:

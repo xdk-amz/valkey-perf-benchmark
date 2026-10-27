@@ -11,6 +11,8 @@ from typing import Dict, Iterable, List, Optional
 
 import valkey
 
+import cpu_layout as layouts
+
 # Constants
 VALKEY_SERVER = "src/valkey-server"
 DEFAULT_PORT = 6379
@@ -124,17 +126,29 @@ class ServerLauncher:
         self,
         results_dir: str,
         valkey_path: str = "../valkey",
-        cores: Optional[str] = None,
+        cpu_range: Optional[str] = None,
         target_ip: str = "127.0.0.1",
+        cores: Optional[str] = None,
     ) -> None:
         self.results_dir = results_dir
         self.valkey_path = valkey_path
-        self.cores = cores
+        # ``cores`` is the old name of this taskset range.
+        self.cpu_range = cpu_range if cpu_range is not None else cores
         self.target_ip = target_ip
         self.module_path = None  # Will be set during launch
         self.cluster_nodes = []  # Track multiple node processes
         self.port = DEFAULT_PORT
         self.thread_layout = None
+        self.active_layout = None
+        self.layout_manifest = None
+
+    @property
+    def cores(self) -> Optional[str]:
+        return self.cpu_range
+
+    @cores.setter
+    def cores(self, value: Optional[str]) -> None:
+        self.cpu_range = value
 
     def server_binary(self) -> str:
         """Absolute path of this checkout's server, so process matching never
@@ -398,6 +412,7 @@ class ServerLauncher:
         cluster_mode: bool,
         io_threads: Optional[int] = None,
         module_path: Optional[str] = None,
+        cpu_range: Optional[str] = None,
     ) -> None:
         """Start Valkey server."""
         log_file = str(
@@ -409,7 +424,7 @@ class ServerLauncher:
         cmd = self._build_server_command(
             port=self.port,
             bind_ip=None,
-            cpu_range=self.cores,
+            cpu_range=cpu_range or self.cpu_range,
             tls_mode=tls_mode,
             cluster_mode=cluster_mode,
             io_threads=io_threads,
@@ -630,12 +645,25 @@ class ServerLauncher:
         io_threads: Optional[int] = None,
         module_path: Optional[str] = None,
         config: Optional[dict] = None,
+        cpu_layout: Optional[dict] = None,
     ) -> None:
-        """Launch Valkey server and setup cluster if needed."""
+        """Launch Valkey server and setup cluster if needed.
+
+        ``cpu_layout`` (a scenario's) overrides the config's; with a layout
+        io-threads come from it and its CPUs replace ``cpu_range``.
+        """
         self.config = config
         self.module_path = module_path
         self.port = (config or {}).get("port", DEFAULT_PORT)
         self.thread_layout = None
+        layout = (
+            cpu_layout if cpu_layout is not None else (config or {}).get("cpu_layout")
+        )
+        self.active_layout = layout
+        self.layout_manifest = None
+        plan = layouts.plan(layout) if layout else None
+        if plan:
+            io_threads = plan["server_config"]["io-threads"]
         # Reset node tracking so a restart doesn't accumulate stale entries
         self.cluster_nodes = []
 
@@ -654,6 +682,8 @@ class ServerLauncher:
 
         try:
             if cluster_mode and config and "cluster_nodes" in config:
+                if plan:
+                    raise ValueError("cpu_layout places one server, not a cluster")
                 logging.info(f"Launching {config['cluster_nodes']}-node cluster...")
 
                 ports = config["cluster_ports"]
@@ -686,16 +716,28 @@ class ServerLauncher:
                     cluster_mode=cluster_mode,
                     io_threads=io_threads,
                     module_path=module_path,
+                    cpu_range=plan["cpus"] if plan else None,
                 )
                 if cluster_mode:
                     self._setup_cluster(tls_mode=tls_mode)
                 logging.info("Valkey server launched successfully.")
-                if config and config.get("thread_pinning"):
+                if plan:
+                    self._apply_layout(tls_mode, plan)
+                elif config and config.get("thread_pinning"):
                     self._pin_threads(tls_mode, config["thread_pinning"], io_threads)
         except Exception as e:
             logging.error(f"Failed to launch Valkey server: {e}")
             self.shutdown(tls_mode)
             raise
+
+    def _apply_layout(self, tls_mode: bool, plan: dict) -> None:
+        with self._client_context(tls_mode) as client:
+            pid = int(client.info("server")["process_id"])
+        self.layout_manifest = layouts.apply_layout(plan, pid, self.target_ip)
+        logging.info(
+            f"CPU layout {plan['label']}: "
+            f"{self.layout_manifest['applied']['threads']}"
+        )
 
     def _pin_threads(self, tls_mode: bool, spec: dict, io_threads) -> None:
         from measurement import pin_server_threads

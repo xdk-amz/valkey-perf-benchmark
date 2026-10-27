@@ -2,8 +2,9 @@
 
 The manifest records the server binary by digest with its text-segment size
 and compiler, the Valkey and harness commits, every generator by name, version
-and digest, the effective config and the host's tuning state. Its id is a
-digest of that content, so runs on an identical setup share one id; each
+and digest, the effective config, the CPU layout as applied and the host's
+tuning state. Its id is a digest of that content (the layout without its
+per-start readback), so runs on an identical setup share one id; each
 metrics row carries it as ``manifest_id``.
 """
 
@@ -98,6 +99,7 @@ def build_manifest(
     build_args: List[str],
     generators: List[Dict[str, object]],
     cfg: dict,
+    cpu_layout: Optional[dict] = None,
 ) -> dict:
     server = (valkey_dir / "src" / "valkey-server").resolve()
     effective = {
@@ -110,6 +112,7 @@ def build_manifest(
         "generators": generators,
         "harness": git_state(HARNESS_DIR),
         "config": json.loads(json.dumps(effective, default=sorted)),
+        "cpu_layout": cpu_layout,
         "argv": sys.argv,
         "host": host_facts(),
     }
@@ -120,6 +123,11 @@ def manifest_id(manifest: dict) -> str:
     stable["host"] = {
         k: v for k, v in manifest["host"].items() if k != "cpu_freq_mhz_at_setup"
     }
+    # Thread ids and kernel readbacks change every start; the plan does not.
+    if stable.get("cpu_layout"):
+        stable["cpu_layout"] = {
+            k: v for k, v in stable["cpu_layout"].items() if k != "applied"
+        }
     blob = json.dumps(stable, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()[:16]
 

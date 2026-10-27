@@ -30,6 +30,7 @@ MEASURED_FIELDS = frozenset(
         "manifest_id",
         "thread_pinning",
         "pinning_warnings",
+        "cpu_layout",
         "cyc_per_cmd",
         "ins_per_cmd",
         "ipc",

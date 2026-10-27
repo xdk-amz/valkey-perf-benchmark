@@ -37,6 +37,7 @@ from measurement import (
     run_measured,
 )
 from metrics_sampler import is_local_address
+import cpu_layout as layouts
 
 # Constants
 VALKEY_BENCHMARK = "src/valkey-benchmark"
@@ -776,6 +777,9 @@ class ClientRunner:
         )
         marker["status"] = "failed"
         marker["error"] = error
+        manifest = self._launcher_attr("layout_manifest")
+        if manifest:
+            marker.update(layouts.row_identity(manifest))
         self._apply_row_metadata(
             marker,
             test_id=test_id,
@@ -982,15 +986,29 @@ class ClientRunner:
         """
         if scenario.get("restart_before", False) or scenario.get("flush_before", False):
             if self.server_launcher:
-                self._restart_server()
+                self._restart_server(self._scenario_layout(scenario))
                 # Re-apply config_set after restart since CONFIG SET values are lost
                 if config_set:
                     self._apply_config_set(config_set)
             else:
                 self._flush_database()
+        elif self.server_launcher and (
+            self._scenario_layout(scenario) != self._launcher_attr("active_layout")
+        ):
+            # A different layout needs a server started under it.
+            self._restart_server(self._scenario_layout(scenario))
+            if config_set:
+                self._apply_config_set(config_set)
 
         for setup_cmd in scenario.get("setup_commands", []):
             self._execute_setup_command(setup_cmd)
+
+    def _scenario_layout(self, scenario: dict) -> Optional[dict]:
+        return scenario.get("cpu_layout", (self.config or {}).get("cpu_layout"))
+
+    def _launcher_attr(self, name: str) -> Optional[dict]:
+        value = getattr(getattr(self, "server_launcher", None), name, None)
+        return value if isinstance(value, dict) else None
 
     def _draw_scenario_seed(self, scenario, origin_simple):
         """Draw one seed shared by a populate pass and its main run."""
@@ -1378,6 +1396,10 @@ class ClientRunner:
             )
             self._measured_extra = None
 
+        manifest = self._launcher_attr("layout_manifest")
+        if manifest:
+            layouts.stamp_row(metrics, manifest)
+
         if origin_simple:
             logging.info(f"Parsed metrics for {command_label}: {metrics}")
             return metrics
@@ -1496,6 +1518,7 @@ class ClientRunner:
         layout = getattr(self.server_launcher, "thread_layout", None)
         if layout:
             extra["thread_pinning"] = ",".join(f"{k}={v}" for k, v in layout.items())
+        if layout or self._launcher_attr("layout_manifest"):
             extra["pinning_warnings"] = "; ".join(pinning_warnings())
         if acl:
             extra["acl_user"] = user
@@ -1781,6 +1804,9 @@ class ClientRunner:
         if not metrics:
             return None
 
+        manifest = self._launcher_attr("layout_manifest")
+        if manifest:
+            layouts.stamp_row(metrics, manifest)
         metrics["status"] = "success"
         self._apply_row_metadata(
             metrics,
@@ -2065,8 +2091,9 @@ class ClientRunner:
         )
         return aggregated
 
-    def _restart_server(self) -> None:
-        """Restart the Valkey server for a clean state."""
+    def _restart_server(self, cpu_layout: Optional[dict] = None) -> None:
+        """Restart the Valkey server for a clean state, under ``cpu_layout``
+        when given, else the config's layout."""
         if self.server_launcher is None:
             logging.error("No server launcher available for restart")
             return
@@ -2092,6 +2119,7 @@ class ClientRunner:
             io_threads=self.io_threads,
             module_path=self.server_launcher.module_path,
             config=self.server_launcher.config,
+            cpu_layout=cpu_layout,
         )
 
         # Wait for server to be ready
