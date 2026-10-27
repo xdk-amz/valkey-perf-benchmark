@@ -35,6 +35,9 @@ try:
 except ImportError:  # run as a script from utils/
     from measured_fields import MEASURED_FIELDS
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cpu_layout import annotate_rows  # noqa: E402
+
 # Shared by all CI/PI calculations and labels.
 CONFIDENCE_LEVEL = 0.95
 CONFIDENCE_PERCENT = int(CONFIDENCE_LEVEL * 100)
@@ -57,7 +60,8 @@ def load_benchmark_data(path: str) -> List[Dict[str, Any]]:
     """Load benchmark data from a JSON file."""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return drop_invalid_rows(json.load(f), path)
+            rows = drop_invalid_rows(json.load(f), path)
+            return annotate_rows(rows, Path(path).parent / "manifests")
     except FileNotFoundError:
         print(f"ERROR: File '{path}' not found", file=sys.stderr)
         sys.exit(1)

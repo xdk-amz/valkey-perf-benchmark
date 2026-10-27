@@ -20,6 +20,9 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import execute_values, Json
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cpu_layout import annotate_rows  # noqa: E402
+
 DESCRIPTION_MAX_LENGTH = 500
 CONFIG_NAME_MAX_LENGTH = 50
 
@@ -90,7 +93,7 @@ def analyze_metrics_schema(metrics_data: List[Dict[str, Any]]) -> Dict[str, str]
             schema[field] = "VARCHAR(255)"
         elif field == "module_commit_timestamp":
             schema[field] = "TIMESTAMPTZ"
-        elif field == "config_set":
+        elif field in ("config_set", "cpu_layout"):
             schema[field] = "JSONB"
         elif field == "config_name":
             schema[field] = f"VARCHAR({CONFIG_NAME_MAX_LENGTH})"
@@ -279,7 +282,7 @@ def convert_metrics_to_rows(
                 if isinstance(value, str) and len(value) > DESCRIPTION_MAX_LENGTH:
                     value = value[:DESCRIPTION_MAX_LENGTH]
                 row.append(value)
-            elif column == "config_set":
+            elif column in ("config_set", "cpu_layout"):
                 value = metric.get(column)
                 row.append(Json(value) if value is not None else None)
             elif column == "config_name":
@@ -406,6 +409,7 @@ def process_commit_metrics(
     # Augment metrics with test_type at push time
     for metric in metrics_data:
         metric["test_type"] = test_type
+    annotate_rows(metrics_data, commit_dir / "manifests")
 
     print(f"\n=== Processing {commit_dir.name} ===")
     count = push_to_postgres(metrics_data, conn, table_name, dry_run)

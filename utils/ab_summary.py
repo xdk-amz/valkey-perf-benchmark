@@ -22,12 +22,16 @@ from typing import Dict, List, Optional, Tuple
 
 from scipy import stats
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cpu_layout import annotate_rows  # noqa: E402
+
 SCENARIO_KEYS = (
     "group",
     "scenario",
     "command",
     "generator",
     "io_threads",
+    "cpu_layout_label",
     "clients",
     "pipeline",
     "data_size",
@@ -40,6 +44,7 @@ SCENARIO_KEYS = (
 def load_rows(results_dir: Path, commit: str) -> List[dict]:
     path = results_dir / commit / "metrics.json"
     rows = json.loads(path.read_text()) if path.exists() else []
+    annotate_rows(rows, results_dir / commit / "manifests")
     return [r for r in rows if r.get("server_ops_s") is not None]
 
 
