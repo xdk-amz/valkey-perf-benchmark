@@ -133,6 +133,16 @@ class ServerLauncher:
         self.target_ip = target_ip
         self.module_path = None  # Will be set during launch
         self.cluster_nodes = []  # Track multiple node processes
+        self.port = DEFAULT_PORT
+        self.thread_layout = None
+
+    def server_binary(self) -> str:
+        """Absolute path of this checkout's server, so process matching never
+        reaches servers started from other checkouts on the same host."""
+        return str((Path(self.valkey_path) / VALKEY_SERVER).resolve())
+
+    def _server_pattern(self) -> str:
+        return f"^{re.escape(self.server_binary())}( |$)"
 
     def _create_client(
         self, tls_mode: bool, host: str = "127.0.0.1", port: int = DEFAULT_PORT
@@ -236,7 +246,7 @@ class ServerLauncher:
         if cpu_range:
             cmd += ["taskset", "-c", cpu_range]
 
-        cmd.append(VALKEY_SERVER)
+        cmd.append(self.server_binary())
 
         # Optional positional config file (must come right after the binary,
         # before any --flag args). Subsequent --flag values override file values.
@@ -373,7 +383,7 @@ class ServerLauncher:
         """Context manager for Valkey client connections."""
         client = None
         try:
-            client = self._create_client(tls_mode)
+            client = self._create_client(tls_mode, port=self.port)
             yield client
         finally:
             if client:
@@ -390,10 +400,14 @@ class ServerLauncher:
         module_path: Optional[str] = None,
     ) -> None:
         """Start Valkey server."""
-        log_file = f"{Path.cwd()}/{self.results_dir}/valkey_log_cluster_{'enabled' if cluster_mode else 'disabled'}_tls_{'enabled' if tls_mode else 'disabled'}.log"
+        log_file = str(
+            Path.cwd()
+            / self.results_dir
+            / f"valkey_log_cluster_{'enabled' if cluster_mode else 'disabled'}_tls_{'enabled' if tls_mode else 'disabled'}.log"
+        )
 
         cmd = self._build_server_command(
-            port=6379,
+            port=self.port,
             bind_ip=None,
             cpu_range=self.cores,
             tls_mode=tls_mode,
@@ -490,7 +504,11 @@ class ServerLauncher:
         node_id: int,
     ) -> None:
         """Launch a single cluster node."""
-        log_file = f"{Path.cwd()}/{self.results_dir}/valkey_cluster_node{node_id}_port{port}.log"
+        log_file = str(
+            Path.cwd()
+            / self.results_dir
+            / f"valkey_cluster_node{node_id}_port{port}.log"
+        )
 
         cmd = self._build_server_command(
             port=port,
@@ -616,6 +634,8 @@ class ServerLauncher:
         """Launch Valkey server and setup cluster if needed."""
         self.config = config
         self.module_path = module_path
+        self.port = (config or {}).get("port", DEFAULT_PORT)
+        self.thread_layout = None
         # Reset node tracking so a restart doesn't accumulate stale entries
         self.cluster_nodes = []
 
@@ -670,10 +690,22 @@ class ServerLauncher:
                 if cluster_mode:
                     self._setup_cluster(tls_mode=tls_mode)
                 logging.info("Valkey server launched successfully.")
+                if config and config.get("thread_pinning"):
+                    self._pin_threads(tls_mode, config["thread_pinning"], io_threads)
         except Exception as e:
             logging.error(f"Failed to launch Valkey server: {e}")
             self.shutdown(tls_mode)
             raise
+
+    def _pin_threads(self, tls_mode: bool, spec: dict, io_threads) -> None:
+        from measurement import pin_server_threads
+
+        with self._client_context(tls_mode) as client:
+            pid = int(client.info("server")["process_id"])
+        # IO threads start with the server; give them a moment to be named.
+        time.sleep(0.3)
+        self.thread_layout = pin_server_threads(pid, spec, io_threads)
+        logging.info(f"Pinned server threads: {self.thread_layout}")
 
     def shutdown(self, tls_mode: bool) -> None:
         """Gracefully shutdown the Valkey server."""
@@ -732,7 +764,7 @@ class ServerLauncher:
         """Get PIDs of running valkey-server processes."""
         try:
             result = subprocess.run(
-                ["pgrep", "-f", VALKEY_SERVER],
+                ["pgrep", "-f", self._server_pattern()],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -761,7 +793,9 @@ class ServerLauncher:
             f"Sending SIGTERM to PIDs: {remaining_pids}"
         )
         try:
-            subprocess.run(["pkill", "-f", VALKEY_SERVER], timeout=5, check=False)
+            subprocess.run(
+                ["pkill", "-f", self._server_pattern()], timeout=5, check=False
+            )
         except Exception as e:
             logging.warning(f"SIGTERM via pkill failed: {e}")
 
@@ -779,7 +813,9 @@ class ServerLauncher:
             f"SIGTERM ineffective. Sending SIGKILL to PIDs: {remaining_pids}"
         )
         try:
-            subprocess.run(["pkill", "-9", "-f", VALKEY_SERVER], timeout=5, check=False)
+            subprocess.run(
+                ["pkill", "-9", "-f", self._server_pattern()], timeout=5, check=False
+            )
         except Exception as e:
             logging.warning(f"SIGKILL via pkill failed: {e}")
 
@@ -789,7 +825,7 @@ class ServerLauncher:
             if not self._valkey_processes_running():
                 logging.info("Valkey server terminated after SIGKILL.")
                 # After SIGKILL, port may be in TIME_WAIT - wait for it
-                self._wait_for_port_available()
+                self._wait_for_port_available(port=self.port)
                 return
             time.sleep(0.5)
 

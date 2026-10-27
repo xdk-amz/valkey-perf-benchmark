@@ -17,6 +17,7 @@ def _make_commands(tls_mode, build_args):
     with (
         patch.object(builder, "clone_and_checkout"),
         patch("valkey_build.subprocess.run") as run,
+        patch("valkey_build.Path.exists", return_value=True),
     ):
         builder.build()
     return [c.args[0] for c in run.call_args_list if c.args[0][0] == "make"]

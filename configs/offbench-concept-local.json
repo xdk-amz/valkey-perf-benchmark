@@ -1,0 +1,141 @@
+[
+  {
+    "test_name": "offbench-concept-local",
+    "cluster_mode": false,
+    "tls_mode": false,
+    "port": 16379,
+    "io-threads": 3,
+    "benchmark-threads": 4,
+    "keyspacelen": [100000],
+    "server_cpu_range": "1-4",
+    "client_cpu_range": "8-15",
+    "thread_pinning": {"main": "2", "io_threads": "3-4", "other": "1"},
+    "measurement": {"window": 5, "settle": 2, "require_main_busy_pct": 90},
+    "generators": {"cachecannon": {"request_timeout": "1s"}},
+    "test_groups": [
+      {
+        "group": 1,
+        "description": "GET, closed loop, valkey-benchmark",
+        "scenarios": [
+          {
+            "id": "get-vb",
+            "type": "read",
+            "test": "GET",
+            "populate_with": "SET",
+            "keyspacelen": 100000,
+            "data_size": 64,
+            "pipeline": 16,
+            "clients": 50,
+            "restart_before": true
+          }
+        ]
+      },
+      {
+        "group": 2,
+        "description": "GET, closed loop, cachecannon",
+        "scenarios": [
+          {
+            "id": "get-cc",
+            "type": "read",
+            "generator": "cachecannon",
+            "test": "GET",
+            "keyspacelen": 100000,
+            "data_size": 64,
+            "pipeline": 16,
+            "clients": 50,
+            "restart_before": true
+          }
+        ]
+      },
+      {
+        "group": 3,
+        "description": "GET:SET 80:20, closed loop, cachecannon",
+        "scenarios": [
+          {
+            "id": "mix-cc",
+            "type": "read",
+            "generator": "cachecannon",
+            "mix": {"get": 80, "set": 20},
+            "keyspacelen": 100000,
+            "data_size": 64,
+            "pipeline": 16,
+            "clients": 50,
+            "restart_before": true
+          }
+        ]
+      },
+      {
+        "group": 4,
+        "description": "GET at a fixed 200k/s, cachecannon",
+        "scenarios": [
+          {
+            "id": "get-cc-200k",
+            "type": "read",
+            "generator": "cachecannon",
+            "test": "GET",
+            "rate": 200000,
+            "keyspacelen": 100000,
+            "data_size": 64,
+            "pipeline": 1,
+            "clients": 32,
+            "restart_before": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "test_name": "offbench-concept-local-acl",
+    "cluster_mode": false,
+    "tls_mode": false,
+    "port": 16379,
+    "io-threads": 3,
+    "benchmark-threads": 4,
+    "keyspacelen": [100000],
+    "server_cpu_range": "1-4",
+    "client_cpu_range": "8-15",
+    "thread_pinning": {"main": "2", "io_threads": "3-4", "other": "1"},
+    "measurement": {
+      "window": 5,
+      "settle": 2,
+      "require_main_busy_pct": 90,
+      "acl": {"user": "bench", "password": "benchpw"}
+    },
+    "test_groups": [
+      {
+        "group": 5,
+        "description": "GET with a per-key ACL user, valkey-benchmark",
+        "scenarios": [
+          {
+            "id": "get-vb-acl",
+            "type": "read",
+            "test": "GET",
+            "populate_with": "SET",
+            "keyspacelen": 100000,
+            "data_size": 64,
+            "pipeline": 16,
+            "clients": 50,
+            "restart_before": true
+          }
+        ]
+      },
+      {
+        "group": 6,
+        "description": "GET with a per-key ACL user, cachecannon",
+        "scenarios": [
+          {
+            "id": "get-cc-acl",
+            "type": "read",
+            "generator": "cachecannon",
+            "test": "GET",
+            "keyspacelen": 100000,
+            "data_size": 64,
+            "pipeline": 16,
+            "clients": 50,
+            "restart_before": true
+          }
+        ]
+      }
+    ]
+  }
+]

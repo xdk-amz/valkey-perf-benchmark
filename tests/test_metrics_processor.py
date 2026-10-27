@@ -177,7 +177,7 @@ class TestCreateMetricsNonNumeric:
         assert result["p99_latency_ms"] == 0.0
         assert result["max_latency_ms"] == 0.0
 
-    def test_missing_keys_default_to_zero(self, processor):
+    def test_missing_keys_are_null(self, processor):
         data = {"rps": "100000.0"}
         result = processor.create_metrics(
             benchmark_data=data,
@@ -189,8 +189,8 @@ class TestCreateMetricsNonNumeric:
         )
 
         assert result["rps"] == 100000.0
-        assert result["avg_latency_ms"] == 0.0
-        assert result["min_latency_ms"] == 0.0
+        assert result["avg_latency_ms"] is None
+        assert result["min_latency_ms"] is None
 
 
 # ---------------------------------------------------------------------------

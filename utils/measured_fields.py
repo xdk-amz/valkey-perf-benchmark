@@ -1,0 +1,41 @@
+"""Row fields written by measured runs (see measurement.py)."""
+
+# Row fields written by measured runs. They are measurements or run metadata,
+# never scenario configuration, so comparisons must not group on them.
+MEASURED_FIELDS = frozenset(
+    {
+        "server_ops_s",
+        "window_s",
+        "main_busy_pct",
+        "main_busy_source",
+        "main_cpu_pct",
+        "io_threads_cores",
+        "generator_cores",
+        "generator_errors",
+        "generator_timeouts",
+        "generator_conns_failed",
+        "generator_samples",
+        "generator_latency_scope",
+        "generator_version",
+        "generator_argv",
+        "connected_clients",
+        "server_asserts",
+        "p90_latency_ms",
+        "p999_latency_ms",
+        "p9999_latency_ms",
+        "valid",
+        "invalid_reasons",
+        "run_index",
+        "order_slot",
+        "manifest_id",
+        "thread_pinning",
+        "pinning_warnings",
+        "cyc_per_cmd",
+        "ins_per_cmd",
+        "ipc",
+        "l1i_miss_per_cmd",
+        "l1d_miss_per_cmd",
+        "br_miss_per_cmd",
+        "perf_status",
+    }
+)

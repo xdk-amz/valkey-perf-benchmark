@@ -1,6 +1,7 @@
 """Build Valkey from source for benchmarking."""
 
 import logging
+import re
 import shutil
 import subprocess
 import time
@@ -19,11 +20,12 @@ class ServerBuilder:
         tls_mode: bool,
         valkey_path: str,
         build_args: Optional[List[str]] = None,
+        repo_url: Optional[str] = None,
     ) -> None:
         self.commit_id = commit_id
         self.tls_mode = tls_mode
         self.build_args = list(build_args or [])
-        self.repo_url = "https://github.com/valkey-io/valkey.git"
+        self.repo_url = repo_url or "https://github.com/valkey-io/valkey.git"
         self.valkey_dir = Path(valkey_path)
 
     def _run(self, command: Iterable[str], cwd: Optional[Path] = None) -> None:
@@ -71,12 +73,18 @@ class ServerBuilder:
             self._run(["./utils/gen-test-certs.sh"], cwd=self.valkey_dir)
         else:
             self._run(["make", *self.build_args, "-j"], cwd=self.valkey_dir)
+        server = self.valkey_dir / "src" / "valkey-server"
+        if not server.exists():
+            raise RuntimeError(f"Build of {self.commit_id} produced no {server}")
 
     def terminate_valkey(self) -> None:
         """Terminate all valkey processes."""
-        logging.info("Terminating any running Valkey server processes...")
+        server = (self.valkey_dir / "src" / "valkey-server").resolve()
+        logging.info(f"Terminating Valkey servers started from {server}...")
         try:
-            subprocess.run(["pkill", "-f", "valkey-server"], check=True)
+            subprocess.run(
+                ["pkill", "-f", f"^{re.escape(str(server))}( |$)"], check=True
+            )
             logging.info("Valkey processes terminated.")
         except subprocess.CalledProcessError as e:
             if e.returncode == 1:

@@ -30,16 +30,34 @@ except ImportError:
     np = None
     FuncFormatter = None
 
+try:
+    from utils.measured_fields import MEASURED_FIELDS
+except ImportError:  # run as a script from utils/
+    from measured_fields import MEASURED_FIELDS
+
 # Shared by all CI/PI calculations and labels.
 CONFIDENCE_LEVEL = 0.95
 CONFIDENCE_PERCENT = int(CONFIDENCE_LEVEL * 100)
+
+
+def drop_invalid_rows(rows: Any, path: str = "") -> Any:
+    """Drop rows a measured run marked invalid; rows without the flag stay."""
+    if not isinstance(rows, list):
+        return rows
+    kept = [r for r in rows if not (isinstance(r, dict) and r.get("valid") is False)]
+    if len(kept) != len(rows):
+        print(
+            f"NOTE: {path}: excluded {len(rows) - len(kept)} invalid run(s)",
+            file=sys.stderr,
+        )
+    return kept
 
 
 def load_benchmark_data(path: str) -> List[Dict[str, Any]]:
     """Load benchmark data from a JSON file."""
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return drop_invalid_rows(json.load(f), path)
     except FileNotFoundError:
         print(f"ERROR: File '{path}' not found", file=sys.stderr)
         sys.exit(1)
@@ -215,6 +233,7 @@ _CONFIG_EXCLUDED_FIELDS = frozenset(
         "p99_latency_ms_pi_upper",
         "p99_latency_ms_pi_percent",
     }
+    | MEASURED_FIELDS
 )
 
 # Failure state and display-only fields do not identify a scenario. In particular,

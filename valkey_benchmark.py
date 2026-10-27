@@ -22,6 +22,21 @@ from samplers import DEFAULT_SOURCES
 from utils.git_utils import resolve_ref, get_commit_timestamp
 from utils.cpu_utils import format_core_list, parse_core_range
 from environment_metadata import collect_environment_metadata
+from generators import (
+    DEFAULT_GENERATOR,
+    GENERATORS,
+    GeneratorRequest,
+    ValkeyBenchmarkGenerator,
+)
+from measurement import (
+    DEFAULTS as MEASUREMENT_DEFAULTS,
+    ServerProbe,
+    finalize_row,
+    measurement_options,
+    pinning_warnings,
+    run_measured,
+)
+from metrics_sampler import is_local_address
 
 # Constants
 VALKEY_BENCHMARK = "src/valkey-benchmark"
@@ -126,6 +141,11 @@ class ClientRunner:
         self.config_suffix = "default"
         self.current_run = 1
         self.client_cpu_ranges = []
+        # Interleaved order runs one rep per call; run_offset numbers it.
+        self.run_offset = 0
+        self.order_slot = None
+        self.manifest_id = None
+        self._measured_extra = None
 
     def _tls_kwargs(self) -> dict:
         """Return the valkey-py TLS arguments, empty when TLS is off."""
@@ -452,7 +472,7 @@ class ClientRunner:
                 continue
 
             for run_num in range(effective_runs):
-                self.current_run = run_num + 1
+                self.current_run = run_num + 1 + self.run_offset
                 if effective_runs > 1:
                     logging.info(
                         f"=== Group {group_id}: {group_description or ''} "
@@ -1254,6 +1274,8 @@ class ClientRunner:
 
     def _execute_benchmark_run(self, scenario, seed_val):
         """Return a process or an aggregated row for a non-mixed scenario."""
+        if self._is_measured(scenario):
+            return None, self._run_measured_scenario(scenario, seed_val)
         if self._should_use_parallel(scenario):
             logging.info(
                 f"Using parallel execution for scenario {scenario.get('id', 'unknown')}"
@@ -1336,11 +1358,25 @@ class ClientRunner:
             scenario.get("clients", 1),
             requests_value,
             warmup_metrics,
-            scenario.get("duration"),
+            scenario.get("duration")
+            or (
+                self._measurement_options()["window"]
+                if self._measured_extra is not None
+                else None
+            ),
         )
 
         if not metrics:
             return None
+
+        if self._measured_extra is not None:
+            finalize_row(
+                metrics,
+                self._measured_extra,
+                self._measurement_options(),
+                scenario,
+            )
+            self._measured_extra = None
 
         if origin_simple:
             logging.info(f"Parsed metrics for {command_label}: {metrics}")
@@ -1359,6 +1395,112 @@ class ClientRunner:
             dataset=scenario.get("dataset"),
         )
         return metrics
+
+    # ---------- measured runs and pluggable generators ----------------------
+
+    def _generator_name(self, scenario: dict) -> str:
+        return scenario.get(
+            "generator", self.config.get("generator", DEFAULT_GENERATOR)
+        )
+
+    def _measurement_options(self) -> dict:
+        return measurement_options(self.config) or dict(MEASUREMENT_DEFAULTS)
+
+    def _is_measured(self, scenario: dict) -> bool:
+        """Measured when the config asks for it or a non-default generator runs."""
+        return bool(measurement_options(self.config)) or (
+            self._generator_name(scenario) != DEFAULT_GENERATOR
+        )
+
+    def _generator(self, name: str):
+        options = dict(self.config.get("generators", {}).get(name, {}))
+        if name == ValkeyBenchmarkGenerator.name:
+            return ValkeyBenchmarkGenerator(
+                self.valkey_benchmark_path,
+                options,
+                command_builder=self._build_benchmark_command,
+            )
+        if name not in GENERATORS:
+            raise ValueError(f"Unknown generator {name!r}")
+        path = options.pop("path", None)
+        if not path:
+            raise ValueError(f"generators.{name}.path is not set")
+        return GENERATORS[name](path, options)
+
+    def _probe_client(self, user=None, password=None):
+        return valkey.Valkey(
+            host=self.target_ip,
+            port=self.config.get("port", DEFAULT_PORT),
+            username=user,
+            password=password,
+            decode_responses=True,
+            socket_timeout=30,
+            socket_connect_timeout=10,
+            **self._tls_kwargs(),
+        )
+
+    def _run_measured_scenario(self, scenario: dict, seed_val) -> Optional[dict]:
+        """Run one scenario under the measurement window; returns its row."""
+        opts = self._measurement_options()
+        generator = self._generator(self._generator_name(scenario))
+        acl = opts.get("acl")
+        user, password = (acl["user"], acl["password"]) if acl else (None, None)
+        probe = ServerProbe(
+            lambda: self._probe_client(user, password),
+            local=is_local_address(self.target_ip),
+        )
+        test_id = scenario.get("id", "unknown")
+        workdir = self.results_dir / "runs" / f"{test_id}_run{self.current_run}"
+        cpu = self.client_cpu_ranges[0] if self.client_cpu_ranges else self.cores
+        req = GeneratorRequest(
+            scenario=scenario,
+            host=self.target_ip,
+            port=self.config.get("port", DEFAULT_PORT),
+            workdir=workdir,
+            duration_s=0,
+            tls=self.tls_mode,
+            cluster=self._should_add_cluster_flag(scenario),
+            cpu_range=cpu,
+            threads=self.benchmark_threads,
+            seed=seed_val,
+            auth_user=user,
+            auth_password=password,
+            cwd=self.valkey_path,
+        )
+        prefills = getattr(generator, "prefills", lambda sc: False)(scenario)
+        expect_keys = (
+            int(scenario.get("keyspacelen", self.config.get("keyspacelen", [0])[0]))
+            if prefills
+            else 0
+        )
+        try:
+            out = run_measured(
+                generator,
+                req,
+                probe,
+                opts,
+                expect_keys=expect_keys,
+                acl=acl,
+                admin_client_factory=self._probe_client,
+            )
+        finally:
+            probe.reset()
+        if out is None:
+            return None
+        extra = out["extra"]
+        extra["run_index"] = self.current_run
+        if self.order_slot is not None:
+            extra["order_slot"] = self.order_slot
+        if self.manifest_id:
+            extra["manifest_id"] = self.manifest_id
+        layout = getattr(self.server_launcher, "thread_layout", None)
+        if layout:
+            extra["thread_pinning"] = ",".join(f"{k}={v}" for k, v in layout.items())
+            extra["pinning_warnings"] = "; ".join(pinning_warnings())
+        if acl:
+            extra["acl_user"] = user
+        self._measured_extra = extra
+        return out["row"]
 
     def _run_post_commands(self, scenario: dict) -> None:
         """Run post_commands once a scenario's benchmark run has finished."""

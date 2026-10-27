@@ -125,15 +125,24 @@ class MetricsProcessor:
                 duration=duration,
             )
 
+            # A generator that does not report a column leaves it null
+            # rather than zero, so a missing percentile is not read as 0 ms.
             metrics_dict.update(
                 {
-                    "rps": safe_float(benchmark_data.get("rps")),
-                    "avg_latency_ms": safe_float(benchmark_data.get("avg_latency_ms")),
-                    "min_latency_ms": safe_float(benchmark_data.get("min_latency_ms")),
-                    "p50_latency_ms": safe_float(benchmark_data.get("p50_latency_ms")),
-                    "p95_latency_ms": safe_float(benchmark_data.get("p95_latency_ms")),
-                    "p99_latency_ms": safe_float(benchmark_data.get("p99_latency_ms")),
-                    "max_latency_ms": safe_float(benchmark_data.get("max_latency_ms")),
+                    key: (
+                        safe_float(benchmark_data.get(key))
+                        if key in benchmark_data
+                        else None
+                    )
+                    for key in (
+                        "rps",
+                        "avg_latency_ms",
+                        "min_latency_ms",
+                        "p50_latency_ms",
+                        "p95_latency_ms",
+                        "p99_latency_ms",
+                        "max_latency_ms",
+                    )
                 }
             )
 

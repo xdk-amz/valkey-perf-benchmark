@@ -28,6 +28,9 @@ from valkey_benchmark import (
     WRITE_COMMANDS,
 )
 from benchmark_build import BenchmarkBuilder
+from generators import DEFAULT_GENERATOR, GENERATORS
+from measurement import validate_measurement, validate_thread_pinning
+from run_manifest import build_manifest, write_manifest
 from samplers import SOURCES
 from utils.cpu_utils import (
     parse_core_range,
@@ -72,6 +75,10 @@ OPTIONAL_CONF_KEYS = [
     "custom-server-configs",
     "custom-server-config-file",
     "build_args",
+    "generator",
+    "generators",
+    "measurement",
+    "thread_pinning",
 ]
 
 BUILD_ARG_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -284,6 +291,31 @@ def parse_args() -> argparse.Namespace:
         "'false' runs only non-cluster tests, 'true' runs only cluster tests. "
         "If not specified, runs all modes in config. "
         "Used with configs that have cluster_mode as array (e.g., [false, true]).",
+    )
+
+    parser.add_argument(
+        "--order",
+        choices=["grouped", "interleaved"],
+        default="grouped",
+        help="Run order across commits. 'grouped' runs every run of one commit, "
+        "then the next. 'interleaved' builds every commit first, then for run k "
+        "runs each commit once with the commit order rotated by k, so each "
+        "commit sits in each slot equally often.",
+    )
+    parser.add_argument(
+        "--cachecannon-path",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="cachecannon binary for scenarios with generator 'cachecannon' "
+        "(overrides generators.cachecannon.path).",
+    )
+    parser.add_argument(
+        "--valkey-repo-url",
+        default=None,
+        metavar="URL",
+        help="Repository to clone commits from (default: valkey-io/valkey). "
+        "A local path or fork URL lets local runs build unpublished commits.",
     )
 
     args, unknown = parser.parse_known_args()
@@ -560,6 +592,24 @@ def validate_config(cfg: dict) -> None:
     if "post_commands" in cfg:
         _validate_string_list(cfg["post_commands"], "post_commands")
 
+    if "generator" in cfg and cfg["generator"] not in GENERATORS:
+        raise ValueError(
+            f"'generator' must be one of {sorted(GENERATORS)}, got {cfg['generator']!r}"
+        )
+    if "generators" in cfg:
+        gens = cfg["generators"]
+        if not isinstance(gens, dict) or not all(
+            k in GENERATORS and isinstance(v, dict) for k, v in gens.items()
+        ):
+            raise ValueError(
+                f"'generators' must map generator names {sorted(GENERATORS)} "
+                "to option objects"
+            )
+    if "measurement" in cfg:
+        validate_measurement(cfg["measurement"])
+    if "thread_pinning" in cfg:
+        validate_thread_pinning(cfg["thread_pinning"])
+
     if "cluster_mode" in cfg and not isinstance(cfg["cluster_mode"], list):
         cfg["cluster_mode"] = parse_bool(cfg["cluster_mode"])
     if "tls_mode" in cfg:
@@ -787,10 +837,15 @@ def validate_test_groups(cfg: dict) -> None:
                             _validate_benchmark_args(child, f"{location}.{side}[{k}]")
                 continue
 
-            if ("test" in scenario) == ("command" in scenario):
+            _validate_generator_scenario(cfg, scenario, location)
+
+            if ("test" in scenario) + ("command" in scenario) + (
+                "mix" in scenario
+            ) != 1:
                 raise ValueError(
                     f"test_groups[{i}].scenarios[{j}] must have exactly one "
-                    "of 'test' or 'command'"
+                    "of 'test' or 'command' (or 'mix' for generators "
+                    "with weighted commands)"
                 )
 
             if "test" in scenario and "options" in scenario:
@@ -806,6 +861,41 @@ def validate_test_groups(cfg: dict) -> None:
                     location,
                     require_write="test" in scenario,
                 )
+
+
+def _validate_generator_scenario(cfg: dict, scenario: dict, location: str) -> None:
+    """Check the fields that choose and shape a scenario's load generator."""
+    name = scenario.get("generator", cfg.get("generator", DEFAULT_GENERATOR))
+    if name not in GENERATORS:
+        raise ValueError(f"{location} 'generator' must be one of {sorted(GENERATORS)}")
+    if "rate" in scenario:
+        _validate_positive_int(scenario["rate"], f"{location}.rate")
+    if "mix" in scenario:
+        mix = scenario["mix"]
+        if (
+            not isinstance(mix, dict)
+            or set(mix) - {"get", "set"}
+            or not all(isinstance(v, int) and v >= 0 for v in mix.values())
+            or not sum(mix.values())
+        ):
+            raise ValueError(
+                f"{location} 'mix' must map 'get'/'set' to non-negative weights"
+            )
+    if name == DEFAULT_GENERATOR:
+        for key in ("rate", "mix"):
+            if key in scenario:
+                raise ValueError(
+                    f"{location} sets '{key}', which valkey-benchmark does not "
+                    "support; use a generator that does"
+                )
+        return
+    # Other generators keep their own keyspace, so the valkey-benchmark
+    # populate and warmup passes would fill keys they never read.
+    for key in ("populate_with", "warmup", "command", "options"):
+        if scenario.get(key):
+            raise ValueError(
+                f"{location} uses generator {name!r}, which does not support '{key}'"
+            )
 
 
 def has_selected_scenarios(cfg: dict) -> bool:
@@ -831,8 +921,15 @@ def run_benchmark_matrix(
     config_name: Optional[str] = None,
     module_commit: Optional[str] = None,
     module_commit_timestamp: Optional[str] = None,
+    run_state: Optional[dict] = None,
+    keep_checkout: bool = False,
 ) -> None:
-    """Orchestrate benchmark execution for all configurations."""
+    """Orchestrate benchmark execution for all configurations.
+
+    ``run_state`` (run_offset, runs, order_slot) lets an interleaved caller run
+    one numbered run of this commit; ``keep_checkout`` leaves the build in
+    place for its next turn.
+    """
     if args.module:
         results_dir = args.results_dir / f"{args.module}_tests"
     else:
@@ -854,6 +951,7 @@ def run_benchmark_matrix(
         tls_mode=cfg["tls_mode"],
         valkey_path=str(valkey_dir),
         build_args=cfg.get("build_args", []),
+        repo_url=getattr(args, "valkey_repo_url", None),
     )
     if not args.use_running_server:
         server_binary = valkey_dir / "src" / "valkey-server"
@@ -887,9 +985,12 @@ def run_benchmark_matrix(
             config_name,
             module_commit,
             module_commit_timestamp,
+            run_state=run_state,
         )
 
     # Cleanup
+    if keep_checkout:
+        return
     if not args.use_running_server:
         if args.valkey_path:
             builder.terminate_valkey()
@@ -974,8 +1075,10 @@ def _execute_benchmark_run(
     config_name=None,
     module_commit=None,
     module_commit_timestamp=None,
+    run_state=None,
 ):
     """Execute a single benchmark run with specific configuration."""
+    run_state = run_state or {}
     cfg = exec_config["cfg"]
     io_threads = exec_config["io_threads"]
 
@@ -1030,6 +1133,11 @@ def _execute_benchmark_run(
             benchmark_path = benchmark_builder.build_benchmark()
             logging.info(f"Built valkey-benchmark: {benchmark_path}")
 
+        cfg = _with_cli_generator_paths(cfg, args)
+        manifest_id = _write_run_manifest(
+            results_dir, commit_id, valkey_dir, cfg, benchmark_path
+        )
+
         runner = ClientRunner(
             commit_id=commit_id,
             config=cfg,
@@ -1042,7 +1150,7 @@ def _execute_benchmark_run(
             io_threads=io_threads,
             valkey_benchmark_path=benchmark_path,
             benchmark_threads=cfg.get("benchmark-threads"),
-            runs=args.runs,
+            runs=run_state.get("runs", args.runs),
             server_launcher=launcher,
             architecture=architecture,
             repository=args.repository,
@@ -1051,6 +1159,9 @@ def _execute_benchmark_run(
             module_commit_timestamp=module_commit_timestamp,
         )
 
+        runner.run_offset = run_state.get("run_offset", 0)
+        runner.order_slot = run_state.get("order_slot")
+        runner.manifest_id = manifest_id
         runner.current_profiling_set = exec_config["profiling_set"]
         runner.current_config_set = exec_config["config_set"]
         runner.config_suffix = exec_config["config_suffix"]
@@ -1064,6 +1175,90 @@ def _execute_benchmark_run(
     # Shutdown server
     if launcher and not args.use_running_server:
         launcher.shutdown(cfg["tls_mode"])
+
+
+def _with_cli_generator_paths(cfg: dict, args: argparse.Namespace) -> dict:
+    """Apply generator paths given on the command line to the config."""
+    if not getattr(args, "cachecannon_path", None):
+        return cfg
+    cfg = dict(cfg)
+    gens = {k: dict(v) for k, v in cfg.get("generators", {}).items()}
+    gens.setdefault("cachecannon", {})["path"] = str(args.cachecannon_path.resolve())
+    cfg["generators"] = gens
+    return cfg
+
+
+def _uses_generator(cfg: dict, name: str) -> bool:
+    default = cfg.get("generator", DEFAULT_GENERATOR)
+    return any(
+        sc.get("generator", default) == name
+        for group in cfg.get("test_groups", [])
+        for sc in group.get("scenarios", [])
+    )
+
+
+def _write_run_manifest(results_dir, commit_id, valkey_dir, cfg, benchmark_path):
+    """Record what this run executes; returns the manifest id for its rows."""
+    from generators import ValkeyBenchmarkGenerator
+
+    identities = []
+    if _uses_generator(cfg, DEFAULT_GENERATOR):
+        identities.append(
+            ValkeyBenchmarkGenerator(benchmark_path, command_builder=list).identity()
+        )
+    for name, options in cfg.get("generators", {}).items():
+        if (
+            name != DEFAULT_GENERATOR
+            and options.get("path")
+            and _uses_generator(cfg, name)
+        ):
+            identities.append(GENERATORS[name](options["path"], options).identity())
+    try:
+        manifest = build_manifest(
+            commit=commit_id,
+            valkey_dir=Path(valkey_dir),
+            build_args=cfg.get("build_args", []),
+            generators=identities,
+            cfg=cfg,
+        )
+        return write_manifest(Path(results_dir), manifest)
+    except Exception:
+        logging.exception("Could not write the run manifest")
+        return None
+
+
+def run_interleaved(cfg: dict, commits: List[str], args: argparse.Namespace) -> None:
+    """Run every commit once per run, rotating the commit order each run.
+
+    Run k starts with commit k mod n, so with n commits and a multiple of n
+    runs every commit occupies every slot equally often and drift over the
+    session cannot favour one commit. Builds stay in place until the end.
+    """
+    n = len(commits)
+    if args.runs % n:
+        logging.warning(
+            f"--runs {args.runs} is not a multiple of {n} commits; "
+            "slots will not be balanced"
+        )
+    for k in range(args.runs):
+        order = commits[k % n :] + commits[: k % n]
+        logging.info(f"=== Interleaved run {k + 1}/{args.runs}: {order} ===")
+        for slot, commit in enumerate(order):
+            run_benchmark_matrix(
+                commit_id=commit,
+                cfg=cfg,
+                args=args,
+                run_state={"runs": 1, "run_offset": k, "order_slot": slot},
+                keep_checkout=True,
+            )
+    if args.use_running_server or args.valkey_path:
+        return
+    for commit in commits:
+        ServerBuilder(
+            commit_id=commit,
+            tls_mode=cfg["tls_mode"],
+            valkey_path=f"../valkey_{commit}",
+        ).terminate_and_clean_valkey()
 
 
 def get_module_binary_path(args: argparse.Namespace, config: dict) -> Optional[str]:
@@ -1190,6 +1385,16 @@ def main() -> None:
                 f"Skipping config {cfg.get('test_name', '')!r}, "
                 "--groups and --scenarios select none of its scenarios"
             )
+            continue
+
+        if args.order == "interleaved" and len(commits) > 1:
+            if args.valkey_path or args.module:
+                print(
+                    "ERROR: --order interleaved needs one checkout per commit; "
+                    "it cannot be combined with --valkey-path or --module"
+                )
+                sys.exit(1)
+            run_interleaved(cfg, commits, args)
             continue
 
         for commit in commits:
