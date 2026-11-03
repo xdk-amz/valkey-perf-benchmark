@@ -64,6 +64,24 @@ CREATE TABLE IF NOT EXISTS benchmark_metrics (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Columns written by measured runs (see "Measured Runs" in README.md).
+-- utils/push_to_postgres.py adds them with these types when it first sees
+-- them (utils/measured_fields.py FIELD_TYPES); they are listed here so a fresh
+-- database has them from the start.
+ALTER TABLE benchmark_metrics
+    ADD COLUMN IF NOT EXISTS generator TEXT,
+    ADD COLUMN IF NOT EXISTS generator_version TEXT,
+    ADD COLUMN IF NOT EXISTS generator_argv TEXT,
+    ADD COLUMN IF NOT EXISTS generator_errors INTEGER,
+    ADD COLUMN IF NOT EXISTS generator_timeouts INTEGER,
+    ADD COLUMN IF NOT EXISTS generator_conns_failed INTEGER,
+    ADD COLUMN IF NOT EXISTS generator_samples INTEGER,
+    ADD COLUMN IF NOT EXISTS generator_latency_scope TEXT,
+    ADD COLUMN IF NOT EXISTS p90_latency_ms DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS p999_latency_ms DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS p9999_latency_ms DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS rate INTEGER;
+
 -- Create benchmark_commits table for tracking commit benchmarking status
 CREATE TABLE IF NOT EXISTS benchmark_commits (
     id SERIAL PRIMARY KEY,
