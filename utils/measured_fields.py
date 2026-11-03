@@ -28,6 +28,8 @@ MEASURED_FIELDS = frozenset(
         "valid",
         "invalid_reasons",
         "run_index",
+        "order_slot",
+        "manifest_id",
         "thread_pinning",
         "pinning_warnings",
         "cyc_per_cmd",
