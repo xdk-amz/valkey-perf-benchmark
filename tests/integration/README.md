@@ -132,3 +132,22 @@ Add to your CI workflow:
 - name: Run integration tests
   run: python -m pytest tests/integration/ -v
 ```
+
+## Tests Against Real Binaries
+
+`test_real_*.py` start real Valkey servers and load generators. They skip
+unless the binaries are named through environment variables:
+
+| Variable | Points at |
+|---|---|
+| `VPB_TEST_VALKEY_DIR` | a built Valkey checkout (`src/valkey-server`, `src/valkey-benchmark`, `src/valkey-cli`) |
+| `VPB_TEST_VALKEY_TLS_DIR` | a checkout built with `BUILD_TLS=yes`, with certificates from `utils/gen-test-certs.sh` |
+| `VPB_TEST_CACHECANNON` | a cachecannon binary |
+
+```bash
+VPB_TEST_VALKEY_DIR=~/valkey VPB_TEST_CACHECANNON=~/cachecannon/target/release/cachecannon \
+  python -m pytest tests/integration -m integration -v
+```
+
+Each test copies the binaries into its own temporary checkout and uses free
+ports, so it only ever starts and stops its own servers.
