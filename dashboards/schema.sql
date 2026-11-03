@@ -64,6 +64,55 @@ CREATE TABLE IF NOT EXISTS benchmark_metrics (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Columns written by measured runs (see "Measured Runs" in README.md).
+-- utils/push_to_postgres.py adds them with these types when it first sees
+-- them (utils/measured_fields.py FIELD_TYPES); they are listed here so a fresh
+-- database has them from the start.
+ALTER TABLE benchmark_metrics
+    ADD COLUMN IF NOT EXISTS generator TEXT,
+    ADD COLUMN IF NOT EXISTS generator_version TEXT,
+    ADD COLUMN IF NOT EXISTS generator_argv TEXT,
+    ADD COLUMN IF NOT EXISTS generator_errors INTEGER,
+    ADD COLUMN IF NOT EXISTS generator_timeouts INTEGER,
+    ADD COLUMN IF NOT EXISTS generator_conns_failed INTEGER,
+    ADD COLUMN IF NOT EXISTS generator_samples INTEGER,
+    ADD COLUMN IF NOT EXISTS generator_processes INTEGER,
+    ADD COLUMN IF NOT EXISTS generator_latency_scope TEXT,
+    ADD COLUMN IF NOT EXISTS generator_cores DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS p90_latency_ms DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS p999_latency_ms DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS p9999_latency_ms DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS server_ops_s DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS window_s DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS server_nodes INTEGER,
+    ADD COLUMN IF NOT EXISTS server_version TEXT,
+    ADD COLUMN IF NOT EXISTS server_asserts INTEGER,
+    ADD COLUMN IF NOT EXISTS connected_clients INTEGER,
+    ADD COLUMN IF NOT EXISTS main_busy_pct DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS main_busy_pct_max DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS main_busy_source TEXT,
+    ADD COLUMN IF NOT EXISTS main_cpu_pct DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS main_runq_wait_pct DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS main_nvcsw_per_s DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS steal_pct DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS steal_scope TEXT,
+    ADD COLUMN IF NOT EXISTS io_threads_cores DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS valid BOOLEAN,
+    ADD COLUMN IF NOT EXISTS invalid_reasons TEXT,
+    ADD COLUMN IF NOT EXISTS run_index INTEGER,
+    ADD COLUMN IF NOT EXISTS order_slot INTEGER,
+    ADD COLUMN IF NOT EXISTS manifest_id TEXT,
+    ADD COLUMN IF NOT EXISTS thread_pinning TEXT,
+    ADD COLUMN IF NOT EXISTS pinning_warnings TEXT,
+    ADD COLUMN IF NOT EXISTS acl_user TEXT,
+    ADD COLUMN IF NOT EXISTS perf_status TEXT,
+    ADD COLUMN IF NOT EXISTS cyc_per_cmd DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS ins_per_cmd DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS ipc DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS l1i_miss_per_cmd DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS l1d_miss_per_cmd DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS br_miss_per_cmd DOUBLE PRECISION;
+
 -- Create benchmark_commits table for tracking commit benchmarking status
 CREATE TABLE IF NOT EXISTS benchmark_commits (
     id SERIAL PRIMARY KEY,

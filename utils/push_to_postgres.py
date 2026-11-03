@@ -20,6 +20,11 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import execute_values, Json
 
+try:
+    from utils.measured_fields import FIELD_TYPES
+except ImportError:  # run as a script from utils/
+    from measured_fields import FIELD_TYPES
+
 DESCRIPTION_MAX_LENGTH = 500
 CONFIG_NAME_MAX_LENGTH = 50
 
@@ -98,6 +103,8 @@ def analyze_metrics_schema(metrics_data: List[Dict[str, Any]]) -> Dict[str, str]
             schema[field] = f"VARCHAR({DESCRIPTION_MAX_LENGTH})"
         elif field in ["error", "dataset"]:
             schema[field] = "TEXT"
+        elif field in FIELD_TYPES:
+            schema[field] = FIELD_TYPES[field]
         else:
             sample_value = field_samples.get(field)
             column_type = detect_field_type(sample_value)
