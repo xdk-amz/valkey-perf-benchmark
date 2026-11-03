@@ -55,6 +55,8 @@ class GeneratorRequest:
     cpu_range: Optional[str] = None
     threads: Optional[int] = None
     seed: Optional[int] = None
+    auth_user: Optional[str] = None
+    auth_password: Optional[str] = None
     cwd: Optional[Path] = None
 
 

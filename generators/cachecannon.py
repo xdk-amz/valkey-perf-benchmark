@@ -4,6 +4,9 @@ cachecannon prints one JSON sample per second, so latency can be taken from
 exactly the seconds inside the measured window and the process can be stopped
 at the window edge. It also offers fixed-rate load (``rate``) and weighted
 GET/SET mixes (``mix``), which valkey-benchmark does not.
+
+RESP AUTH needs a cachecannon build with ``target.auth_user`` and
+``target.auth_password``; older builds reject those keys.
 """
 
 import json
@@ -130,6 +133,10 @@ class CachecannonGenerator(LoadGenerator):
         ]
         if req.cluster:
             lines.append("cluster = true")
+        if req.auth_password:
+            if req.auth_user:
+                lines.append(f"auth_user = {_toml_str(req.auth_user)}")
+            lines.append(f"auth_password = {_toml_str(req.auth_password)}")
         lines += [
             "[connection]",
             f"connections = {int(sc.get('clients', 1))}",
