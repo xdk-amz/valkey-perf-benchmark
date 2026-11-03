@@ -51,6 +51,9 @@ class GeneratorRequest:
     workdir: Path
     duration_s: int
     tls: bool = False
+    # Directory with ca.crt and the client's valkey.crt/valkey.key, as written
+    # by Valkey's utils/gen-test-certs.sh.
+    tls_dir: Optional[Path] = None
     cluster: bool = False
     cpu_range: Optional[str] = None
     threads: Optional[int] = None

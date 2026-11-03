@@ -468,6 +468,13 @@ does not report (`avg_latency_ms`, `min_latency_ms`, `p95_latency_ms`) are
 written as null. Each row records `generator`, `generator_version` and
 `generator_argv`.
 
+With `tls_mode` on, cachecannon connects over TLS with the same certificates
+as the framework's other clients (`tests/tls/ca.crt`, `valkey.crt` and
+`valkey.key` from Valkey's `utils/gen-test-certs.sh`). Fixed-rate scenarios
+need a cachecannon build from 2026-10-14 or later (commit 084d162): older
+builds start with a second of banked requests and run above the target rate
+until it is spent.
+
 ### Measured Runs (`measurement`)
 
 With `"measurement"` set, every scenario in `test_groups` runs under a fixed

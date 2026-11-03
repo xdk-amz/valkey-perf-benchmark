@@ -12,11 +12,11 @@ RESP AUTH needs a cachecannon build with ``target.auth_user`` and
 import json
 import re
 import statistics
+from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from .base import (
-    GeneratorError,
     GeneratorRequest,
     GeneratorResult,
     LoadGenerator,
@@ -133,6 +133,15 @@ class CachecannonGenerator(LoadGenerator):
         ]
         if req.cluster:
             lines.append("cluster = true")
+        if req.tls:
+            lines.append("tls = true")
+            if req.tls_dir:
+                d = Path(req.tls_dir).resolve()
+                lines += [
+                    f"tls_ca_file = {_toml_str(str(d / 'ca.crt'))}",
+                    f"tls_cert_file = {_toml_str(str(d / 'valkey.crt'))}",
+                    f"tls_key_file = {_toml_str(str(d / 'valkey.key'))}",
+                ]
         if req.auth_password:
             if req.auth_user:
                 lines.append(f"auth_user = {_toml_str(req.auth_user)}")
@@ -168,8 +177,6 @@ class CachecannonGenerator(LoadGenerator):
         return "\n".join(lines) + "\n"
 
     def build_argv(self, req: GeneratorRequest) -> List[str]:
-        if req.tls:
-            raise GeneratorError("cachecannon backend: TLS is not supported yet")
         path = req.workdir / "cachecannon.toml"
         path.write_text(self.toml(req))
         return [self.binary, str(path)]

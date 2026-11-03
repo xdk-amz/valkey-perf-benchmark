@@ -1425,6 +1425,7 @@ class ClientRunner:
             workdir=self.results_dir / "runs" / f"{test_id}_run{self.current_run}",
             duration_s=duration_s,
             tls=self.tls_mode,
+            tls_dir=Path(self.valkey_path) / "tests" / "tls" if self.tls_mode else None,
             cluster=self._should_add_cluster_flag(scenario),
             cpu_range=self.client_cpu_ranges[0] if self.client_cpu_ranges else None,
             threads=self.benchmark_threads,
