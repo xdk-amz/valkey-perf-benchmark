@@ -138,6 +138,10 @@ class ClientRunner:
         self.config_suffix = "default"
         self.current_run = 1
         self.client_cpu_ranges = []
+        # Interleaved order runs one rep per call; run_offset numbers it.
+        self.run_offset = 0
+        self.order_slot = None
+        self.manifest_id = None
 
     def _tls_kwargs(self) -> dict:
         """Return the valkey-py TLS arguments, empty when TLS is off."""
@@ -464,7 +468,7 @@ class ClientRunner:
                 continue
 
             for run_num in range(effective_runs):
-                self.current_run = run_num + 1
+                self.current_run = run_num + 1 + self.run_offset
                 if effective_runs > 1:
                     logging.info(
                         f"=== Group {group_id}: {group_description or ''} "
@@ -779,6 +783,7 @@ class ClientRunner:
             scenario_description=parent.get("description"),
             dataset=workload.get("dataset"),
         )
+        self._stamp_provenance(marker)
         return marker
 
     def _setup_profiling_and_metrics(self, profiling_set: dict, commit_time: str):
@@ -1364,6 +1369,7 @@ class ClientRunner:
             metrics.update(extra)
         if scenario.get("rate"):
             metrics["rate"] = int(scenario["rate"])
+        self._stamp_provenance(metrics)
 
         if origin_simple:
             logging.info(f"Parsed metrics for {command_label}: {metrics}")
@@ -1382,6 +1388,14 @@ class ClientRunner:
             dataset=scenario.get("dataset"),
         )
         return metrics
+
+    def _stamp_provenance(self, metrics: dict) -> None:
+        """Record which manifest a row came from and its place in the order."""
+        if getattr(self, "manifest_id", None):
+            metrics["manifest_id"] = self.manifest_id
+        if getattr(self, "order_slot", None) is not None:
+            metrics["run_index"] = self.current_run
+            metrics["order_slot"] = self.order_slot
 
     # ---------- other load generators --------------------------------------
 

@@ -162,3 +162,48 @@ def run_benchmark(
 def read_rows(tmp_path: Path, commit: str = "HEAD") -> List[dict]:
     path = tmp_path / "results" / commit / "metrics.json"
     return json.loads(path.read_text()) if path.exists() else []
+
+
+def make_commit_checkouts(tmp_path: Path, refs: List[str]):
+    """Lay out ``tmp_path/valkey_<ref>`` checkouts tagged ``ref``, as
+    benchmark.py expects when it builds commits itself, and return the
+    working directory to run benchmark.py from (``tmp_path/work``)."""
+    for ref in refs:
+        checkout = make_checkout(tmp_path / f"valkey_{ref}")
+        subprocess.run(["git", "tag", ref], cwd=checkout, check=True)
+    tools = make_checkout(tmp_path / "tools")
+    work = tmp_path / "work"
+    work.mkdir()
+    return work, tools
+
+
+def run_benchmark_commits(
+    tmp_path: Path,
+    configs: List[dict],
+    refs: List[str],
+    *extra: str,
+    timeout: int = 900,
+) -> subprocess.CompletedProcess:
+    """Run benchmark.py over several prepared commit checkouts (no build)."""
+    work, tools = make_commit_checkouts(tmp_path, refs)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(configs, indent=2))
+    argv = [
+        sys.executable,
+        str(PROJECT_ROOT / "benchmark.py"),
+        "--config",
+        str(config_path),
+        "--commits",
+        *refs,
+        "--valkey-benchmark-path",
+        str(tools / "src" / "valkey-benchmark"),
+        "--results-dir",
+        str(tmp_path / "results"),
+        *extra,
+    ]
+    result = subprocess.run(
+        argv, cwd=work, capture_output=True, text=True, timeout=timeout
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout[-4000:] + result.stderr[-4000:])
+    return result

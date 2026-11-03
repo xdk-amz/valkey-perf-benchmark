@@ -512,6 +512,22 @@ re-enabled afterwards. Rows carry `acl_user`, which is a comparison dimension.
 cachecannon needs a build that supports `target.auth_user` and
 `target.auth_password`.
 
+### Run Order and Run Manifests
+
+`--order interleaved` builds every commit first, then for run k runs each
+commit once with the commit order rotated by k. With n commits and a multiple
+of n runs, every commit sits in every slot equally often, so drift over the
+session (thermal, other load) cannot favour one commit. Rows carry
+`run_index` and `order_slot`. It needs one checkout per commit, so it cannot
+be combined with `--valkey-path` or `--module`.
+
+Every run writes `results/<commit>/manifests/<id>.json` with the server
+binary's sha256, `.text` size and compiler, the Valkey commit and whether its
+tree was dirty, build args, every generator's name, version and sha256, the
+harness commit, the effective config, argv and host facts. The id is a digest
+of that content (without argv or the live CPU frequency), so runs on the same
+setup share an id, and every row carries it as `manifest_id`.
+
 ### Post-run Commands (`post_commands`)
 
 `post_commands` is a list of Valkey commands that runs **after** a benchmark run

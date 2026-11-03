@@ -31,6 +31,7 @@ from benchmark_build import BenchmarkBuilder
 from generators import DEFAULT_GENERATOR, GENERATORS, GENERATOR_NAMES
 from measurement import validate_measurement
 from thread_pinning import validate_thread_pinning
+from run_manifest import build_manifest, write_manifest
 from samplers import SOURCES
 from utils.cpu_utils import (
     parse_core_range,
@@ -293,6 +294,15 @@ def parse_args() -> argparse.Namespace:
         "Used with configs that have cluster_mode as array (e.g., [false, true]).",
     )
 
+    parser.add_argument(
+        "--order",
+        choices=["grouped", "interleaved"],
+        default="grouped",
+        help="Run order across commits. 'grouped' runs every run of one commit, "
+        "then the next. 'interleaved' builds every commit first, then for run k "
+        "runs each commit once with the commit order rotated by k, so each "
+        "commit sits in each slot equally often.",
+    )
     parser.add_argument(
         "--cachecannon-path",
         type=Path,
@@ -936,8 +946,15 @@ def run_benchmark_matrix(
     config_name: Optional[str] = None,
     module_commit: Optional[str] = None,
     module_commit_timestamp: Optional[str] = None,
+    run_state: Optional[dict] = None,
+    keep_checkout: bool = False,
 ) -> None:
-    """Orchestrate benchmark execution for all configurations."""
+    """Orchestrate benchmark execution for all configurations.
+
+    ``run_state`` (run_offset, runs, order_slot) lets an interleaved caller run
+    one numbered run of this commit; ``keep_checkout`` leaves the build in
+    place for its next turn.
+    """
     if args.module:
         results_dir = args.results_dir / f"{args.module}_tests"
     else:
@@ -993,9 +1010,12 @@ def run_benchmark_matrix(
             config_name,
             module_commit,
             module_commit_timestamp,
+            run_state=run_state,
         )
 
     # Cleanup
+    if keep_checkout:
+        return
     if not args.use_running_server:
         if args.valkey_path:
             builder.terminate_valkey()
@@ -1080,8 +1100,10 @@ def _execute_benchmark_run(
     config_name=None,
     module_commit=None,
     module_commit_timestamp=None,
+    run_state=None,
 ):
     """Execute a single benchmark run with specific configuration."""
+    run_state = run_state or {}
     cfg = exec_config["cfg"]
     io_threads = exec_config["io_threads"]
 
@@ -1137,6 +1159,9 @@ def _execute_benchmark_run(
             logging.info(f"Built valkey-benchmark: {benchmark_path}")
 
         cfg = _with_cli_generator_paths(cfg, args)
+        manifest_id = _write_run_manifest(
+            results_dir, commit_id, valkey_dir, cfg, benchmark_path
+        )
 
         runner = ClientRunner(
             commit_id=commit_id,
@@ -1150,7 +1175,7 @@ def _execute_benchmark_run(
             io_threads=io_threads,
             valkey_benchmark_path=benchmark_path,
             benchmark_threads=cfg.get("benchmark-threads"),
-            runs=args.runs,
+            runs=run_state.get("runs", args.runs),
             server_launcher=launcher,
             architecture=architecture,
             repository=args.repository,
@@ -1159,6 +1184,9 @@ def _execute_benchmark_run(
             module_commit_timestamp=module_commit_timestamp,
         )
 
+        runner.run_offset = run_state.get("run_offset", 0)
+        runner.order_slot = run_state.get("order_slot")
+        runner.manifest_id = manifest_id
         runner.current_profiling_set = exec_config["profiling_set"]
         runner.current_config_set = exec_config["config_set"]
         runner.config_suffix = exec_config["config_suffix"]
@@ -1183,6 +1211,75 @@ def _with_cli_generator_paths(cfg: dict, args: argparse.Namespace) -> dict:
     gens.setdefault("cachecannon", {})["path"] = str(args.cachecannon_path.resolve())
     cfg["generators"] = gens
     return cfg
+
+
+def _uses_generator(cfg: dict, name: str) -> bool:
+    default = cfg.get("generator", DEFAULT_GENERATOR)
+    return any(
+        sc.get("generator", default) == name
+        for group in cfg.get("test_groups", [])
+        for sc in group.get("scenarios", [])
+    ) or (name == DEFAULT_GENERATOR and "test_groups" not in cfg)
+
+
+def _write_run_manifest(results_dir, commit_id, valkey_dir, cfg, benchmark_path):
+    """Record what this run executes; returns the manifest id for its rows."""
+    from generators import ValkeyBenchmarkGenerator
+
+    identities = []
+    if _uses_generator(cfg, DEFAULT_GENERATOR) and benchmark_path:
+        identities.append(
+            ValkeyBenchmarkGenerator(benchmark_path, command_builder=list).identity()
+        )
+    for name, options in cfg.get("generators", {}).items():
+        if options.get("path") and _uses_generator(cfg, name):
+            identities.append(GENERATORS[name](options["path"], options).identity())
+    try:
+        manifest = build_manifest(
+            commit=commit_id,
+            valkey_dir=Path(valkey_dir),
+            build_args=cfg.get("build_args", []),
+            generators=identities,
+            cfg=cfg,
+        )
+        return write_manifest(Path(results_dir), manifest)
+    except Exception:
+        logging.exception("Could not write the run manifest")
+        return None
+
+
+def run_interleaved(cfg: dict, commits: List[str], args: argparse.Namespace) -> None:
+    """Run every commit once per run, rotating the commit order each run.
+
+    Run k starts with commit k mod n, so with n commits and a multiple of n
+    runs every commit occupies every slot equally often and drift over the
+    session cannot favour one commit. Builds stay in place until the end.
+    """
+    n = len(commits)
+    if args.runs % n:
+        logging.warning(
+            f"--runs {args.runs} is not a multiple of {n} commits; "
+            "slots will not be balanced"
+        )
+    for k in range(args.runs):
+        order = commits[k % n :] + commits[: k % n]
+        logging.info(f"=== Interleaved run {k + 1}/{args.runs}: {order} ===")
+        for slot, commit in enumerate(order):
+            run_benchmark_matrix(
+                commit_id=commit,
+                cfg=cfg,
+                args=args,
+                run_state={"runs": 1, "run_offset": k, "order_slot": slot},
+                keep_checkout=True,
+            )
+    if args.use_running_server or args.valkey_path:
+        return
+    for commit in commits:
+        ServerBuilder(
+            commit_id=commit,
+            tls_mode=cfg["tls_mode"],
+            valkey_path=f"../valkey_{commit}",
+        ).terminate_and_clean_valkey()
 
 
 def get_module_binary_path(args: argparse.Namespace, config: dict) -> Optional[str]:
@@ -1309,6 +1406,16 @@ def main() -> None:
                 f"Skipping config {cfg.get('test_name', '')!r}, "
                 "--groups and --scenarios select none of its scenarios"
             )
+            continue
+
+        if args.order == "interleaved" and len(commits) > 1:
+            if args.valkey_path or args.module:
+                print(
+                    "ERROR: --order interleaved needs one checkout per commit; "
+                    "it cannot be combined with --valkey-path or --module"
+                )
+                sys.exit(1)
+            run_interleaved(cfg, commits, args)
             continue
 
         for commit in commits:
