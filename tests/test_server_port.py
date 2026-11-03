@@ -31,3 +31,30 @@ def test_configured_port_reaches_server_and_clients():
 def test_default_port_without_config():
     launcher, argv, _ = _launch(None)
     assert _port_arg(argv) == str(DEFAULT_PORT)
+
+
+def test_absolute_results_dir_gives_absolute_logfile(tmp_path):
+    launcher = ServerLauncher(results_dir=str(tmp_path / "r"), valkey_path="/tmp/v")
+    with (
+        patch.object(launcher, "_run") as run,
+        patch.object(launcher, "_create_client", return_value=MagicMock()),
+        patch.object(launcher, "_reset_ext_storage_file"),
+    ):
+        launcher.launch(cluster_mode=False, tls_mode=False, config=None)
+    argv = run.call_args.args[0]
+    log = argv[argv.index("--logfile") + 1]
+    assert log.startswith(str(tmp_path / "r") + "/")
+
+
+def test_relative_results_dir_is_under_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    launcher = ServerLauncher(results_dir="results/x", valkey_path="/tmp/v")
+    with (
+        patch.object(launcher, "_run") as run,
+        patch.object(launcher, "_create_client", return_value=MagicMock()),
+        patch.object(launcher, "_reset_ext_storage_file"),
+    ):
+        launcher.launch(cluster_mode=False, tls_mode=False, config=None)
+    argv = run.call_args.args[0]
+    log = argv[argv.index("--logfile") + 1]
+    assert log.startswith(str(tmp_path / "results" / "x") + "/")
