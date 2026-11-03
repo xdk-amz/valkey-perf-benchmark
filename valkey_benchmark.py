@@ -22,10 +22,18 @@ from samplers import DEFAULT_SOURCES
 from utils.git_utils import resolve_ref, get_commit_timestamp
 from utils.cpu_utils import format_core_list, parse_core_range
 from environment_metadata import collect_environment_metadata
+from generators import (
+    DEFAULT_GENERATOR,
+    GENERATORS,
+    GeneratorRequest,
+    run_for_duration,
+)
 
 # Constants
 VALKEY_BENCHMARK = "src/valkey-benchmark"
 DEFAULT_PORT = 6379
+# Key of an aggregated row's generator-only fields, merged into the metrics row.
+GENERATOR_EXTRA = "_generator_extra"
 DEFAULT_TIMEOUT = 30
 
 # Pause between retried populate passes, giving eviction room to catch up.
@@ -1254,6 +1262,8 @@ class ClientRunner:
 
     def _execute_benchmark_run(self, scenario, seed_val):
         """Return a process or an aggregated row for a non-mixed scenario."""
+        if self._generator_name(scenario) != DEFAULT_GENERATOR:
+            return None, self._run_generator_scenario(scenario, seed_val)
         if self._should_use_parallel(scenario):
             logging.info(
                 f"Using parallel execution for scenario {scenario.get('id', 'unknown')}"
@@ -1302,8 +1312,10 @@ class ClientRunner:
 
         requests_value = scenario.get("requests") or scenario.get("maxdocs")
 
+        extra = None
         if aggregated_row:
-            row = aggregated_row
+            row = dict(aggregated_row)
+            extra = row.pop(GENERATOR_EXTRA, None)
             command_label = (
                 scenario["command"]
                 if "command" in scenario
@@ -1342,6 +1354,9 @@ class ClientRunner:
         if not metrics:
             return None
 
+        if extra:
+            metrics.update(extra)
+
         if origin_simple:
             logging.info(f"Parsed metrics for {command_label}: {metrics}")
             return metrics
@@ -1359,6 +1374,59 @@ class ClientRunner:
             dataset=scenario.get("dataset"),
         )
         return metrics
+
+    # ---------- other load generators --------------------------------------
+
+    def _generator_name(self, scenario: dict) -> str:
+        return scenario.get(
+            "generator", self.config.get("generator", DEFAULT_GENERATOR)
+        )
+
+    def _generator(self, name: str):
+        if name not in GENERATORS:
+            raise ValueError(f"Unknown generator {name!r}")
+        options = dict(self.config.get("generators", {}).get(name, {}))
+        path = options.pop("path", None)
+        if not path:
+            raise ValueError(f"generators.{name}.path is not set")
+        return GENERATORS[name](path, options)
+
+    def _generator_request(self, scenario: dict, seed_val, duration_s: int):
+        test_id = scenario.get("id", "unknown")
+        return GeneratorRequest(
+            scenario=scenario,
+            host=self.target_ip,
+            port=self.config.get("port", DEFAULT_PORT),
+            workdir=self.results_dir / "runs" / f"{test_id}_run{self.current_run}",
+            duration_s=duration_s,
+            tls=self.tls_mode,
+            cluster=self._should_add_cluster_flag(scenario),
+            cpu_range=self.client_cpu_ranges[0] if self.client_cpu_ranges else None,
+            threads=self.benchmark_threads,
+            seed=seed_val,
+            cwd=self.valkey_path,
+        )
+
+    def _run_generator_scenario(self, scenario: dict, seed_val) -> Optional[dict]:
+        """Run a scenario on a non-default generator for its duration.
+
+        Returns a row in valkey-benchmark's CSV columns; fields only this
+        generator reports ride along under GENERATOR_EXTRA.
+        """
+        generator = self._generator(self._generator_name(scenario))
+        req = self._generator_request(scenario, seed_val, int(scenario["duration"]))
+        result = run_for_duration(generator, req)
+        if result is None:
+            return None
+        return {
+            **result.row,
+            GENERATOR_EXTRA: {
+                "generator": generator.name,
+                "generator_version": generator.version(),
+                "generator_argv": " ".join(result.argv),
+                **result.extra,
+            },
+        }
 
     def _run_post_commands(self, scenario: dict) -> None:
         """Run post_commands once a scenario's benchmark run has finished."""

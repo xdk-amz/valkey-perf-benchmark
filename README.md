@@ -425,6 +425,37 @@ variants (insert/delete/substitute) match under fuzzy search.
 See `configs/module-test-arm.json` for a runnable example that includes a
 mixed workload and per-cluster-execution options.
 
+### Load Generators (`generator`)
+
+`valkey-benchmark` is the default load generator. A scenario in `test_groups`
+can run on another generator instead, chosen per scenario or for the whole
+config with `"generator"`. Generator options live under `"generators"`:
+
+```json
+{
+  "generators": {"cachecannon": {"path": "/opt/cachecannon", "threads": 4}},
+  "test_groups": [{"group": 1, "scenarios": [
+    {"id": "get", "generator": "cachecannon", "test": "GET",
+     "clients": 50, "pipeline": 16, "keyspacelen": 100000, "data_size": 64,
+     "duration": 60},
+    {"id": "mix", "generator": "cachecannon", "mix": {"get": 80, "set": 20},
+     "clients": 50, "duration": 60},
+    {"id": "fixed-rate", "generator": "cachecannon", "test": "GET",
+     "rate": 200000, "clients": 50, "duration": 60}
+  ]}]
+}
+```
+
+`--cachecannon-path` overrides `generators.cachecannon.path`.
+
+[cachecannon](https://github.com/cachecannon/cachecannon) adds weighted
+GET/SET mixes (`mix`), fixed-rate load (`rate`) and p90/p99.9/p99.99
+latency columns. It fills its own keyspace, so its scenarios take `duration`
+rather than `requests` and do not use `populate_with` or `warmup`. Columns it
+does not report (`avg_latency_ms`, `min_latency_ms`, `p95_latency_ms`) are
+written as null. Each row records `generator`, `generator_version` and
+`generator_argv`.
+
 ### Post-run Commands (`post_commands`)
 
 `post_commands` is a list of Valkey commands that runs **after** a benchmark run

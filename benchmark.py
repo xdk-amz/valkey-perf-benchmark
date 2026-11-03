@@ -28,6 +28,7 @@ from valkey_benchmark import (
     WRITE_COMMANDS,
 )
 from benchmark_build import BenchmarkBuilder
+from generators import DEFAULT_GENERATOR, GENERATORS, GENERATOR_NAMES
 from samplers import SOURCES
 from utils.cpu_utils import (
     parse_core_range,
@@ -72,6 +73,8 @@ OPTIONAL_CONF_KEYS = [
     "custom-server-configs",
     "custom-server-config-file",
     "build_args",
+    "generator",
+    "generators",
 ]
 
 BUILD_ARG_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -286,6 +289,14 @@ def parse_args() -> argparse.Namespace:
         "Used with configs that have cluster_mode as array (e.g., [false, true]).",
     )
 
+    parser.add_argument(
+        "--cachecannon-path",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="cachecannon binary for scenarios with generator 'cachecannon' "
+        "(overrides generators.cachecannon.path).",
+    )
     parser.add_argument(
         "--valkey-repo-url",
         default=None,
@@ -568,6 +579,21 @@ def validate_config(cfg: dict) -> None:
     if "post_commands" in cfg:
         _validate_string_list(cfg["post_commands"], "post_commands")
 
+    if "generator" in cfg and cfg["generator"] not in GENERATOR_NAMES:
+        raise ValueError(
+            f"'generator' must be one of {sorted(GENERATOR_NAMES)}, "
+            f"got {cfg['generator']!r}"
+        )
+    if "generators" in cfg:
+        gens = cfg["generators"]
+        if not isinstance(gens, dict) or not all(
+            k in GENERATORS and isinstance(v, dict) for k, v in gens.items()
+        ):
+            raise ValueError(
+                f"'generators' must map generator names {sorted(GENERATORS)} "
+                "to option objects"
+            )
+
     if "cluster_mode" in cfg and not isinstance(cfg["cluster_mode"], list):
         cfg["cluster_mode"] = parse_bool(cfg["cluster_mode"])
     if "tls_mode" in cfg:
@@ -795,10 +821,15 @@ def validate_test_groups(cfg: dict) -> None:
                             _validate_benchmark_args(child, f"{location}.{side}[{k}]")
                 continue
 
-            if ("test" in scenario) == ("command" in scenario):
+            _validate_generator_scenario(cfg, scenario, location)
+
+            if ("test" in scenario) + ("command" in scenario) + (
+                "mix" in scenario
+            ) != 1:
                 raise ValueError(
                     f"test_groups[{i}].scenarios[{j}] must have exactly one "
-                    "of 'test' or 'command'"
+                    "of 'test' or 'command' (or 'mix' for generators "
+                    "with weighted commands)"
                 )
 
             if "test" in scenario and "options" in scenario:
@@ -814,6 +845,50 @@ def validate_test_groups(cfg: dict) -> None:
                     location,
                     require_write="test" in scenario,
                 )
+
+
+def _validate_generator_scenario(cfg: dict, scenario: dict, location: str) -> None:
+    """Check the fields that choose and shape a scenario's load generator."""
+    name = scenario.get("generator", cfg.get("generator", DEFAULT_GENERATOR))
+    if name not in GENERATOR_NAMES:
+        raise ValueError(
+            f"{location} 'generator' must be one of {sorted(GENERATOR_NAMES)}"
+        )
+    if "rate" in scenario:
+        _validate_positive_int(scenario["rate"], f"{location}.rate")
+    if "mix" in scenario:
+        mix = scenario["mix"]
+        if (
+            not isinstance(mix, dict)
+            or set(mix) - {"get", "set"}
+            or not all(isinstance(v, int) and v >= 0 for v in mix.values())
+            or not sum(mix.values())
+        ):
+            raise ValueError(
+                f"{location} 'mix' must map 'get'/'set' to non-negative weights"
+            )
+    if name == DEFAULT_GENERATOR:
+        for key in ("rate", "mix"):
+            if key in scenario:
+                raise ValueError(
+                    f"{location} sets '{key}', which valkey-benchmark does not "
+                    "support; use a generator that does"
+                )
+        return
+    # Other generators keep their own keyspace, so the valkey-benchmark
+    # populate and warmup passes would fill keys they never read.
+    for key in ("populate_with", "warmup", "command", "options", "requests"):
+        if scenario.get(key):
+            raise ValueError(
+                f"{location} uses generator {name!r}, which does not support '{key}'"
+            )
+    if not _generator_scenario_timed(cfg, scenario):
+        raise ValueError(f"{location} uses generator {name!r} and needs a 'duration'")
+
+
+def _generator_scenario_timed(cfg: dict, scenario: dict) -> bool:
+    """Whether a non-default generator scenario knows how long to run."""
+    return bool(scenario.get("duration"))
 
 
 def has_selected_scenarios(cfg: dict) -> bool:
@@ -1039,6 +1114,8 @@ def _execute_benchmark_run(
             benchmark_path = benchmark_builder.build_benchmark()
             logging.info(f"Built valkey-benchmark: {benchmark_path}")
 
+        cfg = _with_cli_generator_paths(cfg, args)
+
         runner = ClientRunner(
             commit_id=commit_id,
             config=cfg,
@@ -1073,6 +1150,17 @@ def _execute_benchmark_run(
     # Shutdown server
     if launcher and not args.use_running_server:
         launcher.shutdown(cfg["tls_mode"])
+
+
+def _with_cli_generator_paths(cfg: dict, args: argparse.Namespace) -> dict:
+    """Apply generator paths given on the command line to the config."""
+    if not getattr(args, "cachecannon_path", None):
+        return cfg
+    cfg = dict(cfg)
+    gens = {k: dict(v) for k, v in cfg.get("generators", {}).items()}
+    gens.setdefault("cachecannon", {})["path"] = str(args.cachecannon_path.resolve())
+    cfg["generators"] = gens
+    return cfg
 
 
 def get_module_binary_path(args: argparse.Namespace, config: dict) -> Optional[str]:
