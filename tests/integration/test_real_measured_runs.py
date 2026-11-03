@@ -79,9 +79,25 @@ def run(tmp_path_factory):
             "pipeline": 1,
         }
     ]
+    version = (
+        subprocess.run(
+            [str(checkout / "src" / "valkey-server"), "--version"],
+            capture_output=True,
+            text=True,
+        )
+        .stdout.split("v=")[1]
+        .split()[0]
+    )
+    versioned = [dict(gated[0], id="light-vb-versioned")]
+    per_version = {"default": 99, version.rsplit(".", 1)[0] + ".": 1}
     configs = [
         _config(port, measured, {"window": 3, "settle": 1, "rate_tolerance_pct": 50}),
         _config(port, gated, {"window": 2, "settle": 1, "require_main_busy_pct": 99}),
+        _config(
+            port,
+            versioned,
+            {"window": 2, "settle": 1, "require_main_busy_pct": per_version},
+        ),
     ]
     result = run_benchmark(tmp_path, configs, checkout)
     assert result.returncode == 0
@@ -139,3 +155,10 @@ def test_compare_drops_invalid_rows(run):
     )
     assert result.returncode == 0, result.stderr
     assert "excluded 1 invalid run(s)" in result.stderr
+
+
+def test_saturation_gate_threshold_per_server_version(run):
+    _, rows = run
+    row = rows["light-vb-versioned"]
+    assert row["server_version"]
+    assert row["valid"] is True, row["invalid_reasons"]

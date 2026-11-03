@@ -29,6 +29,7 @@ MEASURED_FIELDS = frozenset(
         "generator_cores",
         "connected_clients",
         "server_asserts",
+        "server_version",
         "valid",
         "invalid_reasons",
         "run_index",
