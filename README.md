@@ -496,7 +496,13 @@ fewer clients than asked, ended inside the window, a fixed-rate scenario
 served more than `rate_tolerance_pct` (5) off its `rate`, or the server log
 shows an assertion. `require_main_busy_pct` is an opt-in saturation gate: a
 closed-loop run whose main thread was less busy than that is invalid, since
-it measured the client rather than the server. `compare_benchmark_results.py`
+it measured the client rather than the server. It takes a number or an object
+keyed by server version prefix, longest match first, with `"default"` as the
+fallback, e.g. `{"default": 98, "255.": 92}` (unstable reports 255.255.255).
+`used_active_time_main_thread` counts event-loop iterations from wakeup to the
+end of `beforeSleep`, so time in `epoll_wait` and work after that point fall
+outside it, and how much does differs by version. Rows record
+`server_version`. `compare_benchmark_results.py`
 drops invalid rows and reports how many it dropped.
 
 Two checks catch a run disturbed by other work on the host, and are on by
