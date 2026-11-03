@@ -166,43 +166,54 @@ def parse_perf_stat(text: str, cmds: float) -> Dict[str, Optional[float]]:
 
 
 class ServerProbe:
-    """Reads the counters a measured run needs from one server."""
+    """Reads the counters a measured run needs from one server or every node
+    of a cluster. A snapshot sums commands, clients and keys over the nodes
+    and keeps main-thread figures per node."""
 
-    def __init__(self, client_factory: Callable, local: bool):
-        self.client_factory = client_factory
+    def __init__(self, client_factory, local: bool):
+        factories = (
+            client_factory if isinstance(client_factory, list) else [client_factory]
+        )
+        self.factories = factories
         self.local = local
-        self._client = None
+        self._clients = [None] * len(factories)
+
+    def clients(self) -> list:
+        for i, factory in enumerate(self.factories):
+            if self._clients[i] is None:
+                self._clients[i] = factory()
+        return self._clients
 
     @property
     def client(self):
-        if self._client is None:
-            self._client = self.client_factory()
-        return self._client
+        """The first node's client."""
+        return self.clients()[0]
 
     def reset(self):
-        if self._client is not None:
-            try:
-                self._client.close()
-            except Exception:
-                pass
-        self._client = None
-
-    def info(self) -> dict:
-        return self.client.info("everything")
+        for c in self._clients:
+            if c is not None:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+        self._clients = [None] * len(self.factories)
 
     def snapshot(self) -> dict:
         t0 = time.time()
-        info = self.info()
+        infos = [c.info("everything") for c in self.clients()]
         t1 = time.time()
+        actives = [info.get("used_active_time_main_thread") for info in infos]
         return {
             "t": (t0 + t1) / 2,
-            "cmds": int(info.get("total_commands_processed", 0)),
-            "active_main_s": info.get("used_active_time_main_thread"),
-            "clients": int(info.get("connected_clients", 0)),
-            "pid": int(info.get("process_id", 0)),
-            "version": info.get("valkey_version") or info.get("redis_version"),
+            "cmds": sum(int(i.get("total_commands_processed", 0)) for i in infos),
+            "active_main_s": None if None in actives else actives,
+            # Each node counts the probe's own connection.
+            "clients": sum(int(i.get("connected_clients", 0)) - 1 for i in infos),
+            "pids": [int(i.get("process_id", 0)) for i in infos],
+            "version": infos[0].get("valkey_version") or infos[0].get("redis_version"),
             "keys": sum(
                 v.get("keys", 0)
+                for info in infos
                 for k, v in info.items()
                 if k.startswith("db") and isinstance(v, dict)
             ),
@@ -232,14 +243,17 @@ def restore_default_user(client) -> None:
 # ---------- measured run -----------------------------------------------------
 
 
-def _server_asserts(client) -> Optional[int]:
-    try:
-        log = client.config_get("logfile").get("logfile")
-        if not log or not Path(log).exists():
-            return None
-        return len(ASSERT_PATTERN.findall(Path(log).read_text(errors="replace")))
-    except Exception:
-        return None
+def _server_asserts(clients) -> Optional[int]:
+    found = None
+    for client in clients:
+        try:
+            log = client.config_get("logfile").get("logfile")
+            if log and Path(log).exists():
+                text = Path(log).read_text(errors="replace")
+                found = (found or 0) + len(ASSERT_PATTERN.findall(text))
+        except Exception:
+            pass
+    return found
 
 
 def _stderr_tail(path: Path) -> str:
@@ -312,195 +326,272 @@ def run_measured(
     opts: dict,
     *,
     expect_keys: int = 0,
-    admin_client_factory: Optional[Callable] = None,
+    admin_client_factory=None,
 ) -> Optional[dict]:
-    """Run one scenario under the window protocol; returns row and extra fields.
+    """Run one generator under the window protocol; returns row and extra.
+
+    See ``run_measured_parts``, which this wraps for a single generator.
+    """
+    out = run_measured_parts(
+        [(generator, req)],
+        probe,
+        opts,
+        expect_keys=expect_keys,
+        admin_client_factory=admin_client_factory,
+    )
+    part = out["parts"][0]
+    if part is None:
+        return None
+    return {"row": part["row"], "extra": {**out["extra"], **part["extra"]}}
+
+
+def run_measured_parts(
+    parts: List[tuple],
+    probe: ServerProbe,
+    opts: dict,
+    *,
+    expect_keys: int = 0,
+    admin_client_factory=None,
+) -> dict:
+    """Run several generators against the server together under one window.
+
+    ``parts`` is a list of (generator, request): the writers and readers of a
+    mixed scenario, or one generator per cluster node. Returns the fields
+    shared by every part (server counters over the window) under ``extra`` and,
+    per part, its parsed row and its own fields under ``parts`` (None for a
+    part whose output could not be parsed).
 
     With ``opts["acl"]`` the bench user is created through
-    ``admin_client_factory`` (a default-user client) before the run, and the
-    default user is re-enabled afterwards through the probe, which then
-    authenticates as the bench user.
+    ``admin_client_factory`` (one default-user client factory, or a list with
+    one per node) before the run, and the default user is re-enabled
+    afterwards through the probe, which authenticates as the bench user.
     """
     window, settle = opts["window"], opts["settle"]
-    expected_clients = generator.expected_connections(req.scenario)
-    if generator.stops_at_window_edge:
-        req.duration_s = opts["ready_timeout"] + settle + window + 30
-    else:
-        req.duration_s = 2 + settle + window + 2
+    for generator, req in parts:
+        if generator.stops_at_window_edge:
+            req.duration_s = opts["ready_timeout"] + settle + window + 30
+        else:
+            req.duration_s = 2 + settle + window + 2
     acl = opts.get("acl")
     if acl:
-        admin = admin_client_factory()
-        try:
-            apply_acl(admin, acl)
-        finally:
-            admin.close()
+        factories = (
+            admin_client_factory
+            if isinstance(admin_client_factory, list)
+            else [admin_client_factory]
+        )
+        for factory in factories:
+            admin = factory()
+            try:
+                apply_acl(admin, acl)
+            finally:
+                admin.close()
     probe.reset()
     try:
-        return _run_window(
-            generator, req, probe, opts, expected_clients, expect_keys, window, settle
-        )
+        return _run_window(parts, probe, opts, expect_keys, window, settle)
     finally:
         try:
             if acl:
-                restore_default_user(probe.client)
+                for client in probe.clients():
+                    restore_default_user(client)
         finally:
             probe.reset()
 
 
-def _run_window(
-    generator, req, probe, opts, expected_clients, expect_keys, window, settle
-):
-    handle = generator.start(req)
+def _local_pids(probe, pids) -> list:
+    if not probe.local:
+        return []
+    return [p for p in pids if p and Path(f"/proc/{p}").exists()]
+
+
+def _ticks(pids, gen_pids, main_cpus) -> dict:
+    """CPU ticks and scheduler counters of every server and generator."""
+    t = {"main": {}, "sched": {}, "io": 0.0, "gen": 0.0}
+    for pid in pids:
+        names = thread_names(pid)
+        t["main"][pid] = thread_ticks(pid, pid)
+        t["io"] += sum(
+            thread_ticks(pid, tid)
+            for tid, n in names.items()
+            if io_thread_index(n) is not None
+        )
+        try:
+            t["sched"][pid] = thread_sched(pid, pid)
+        except (OSError, IndexError, ValueError):
+            pass
+    for gpid in gen_pids:
+        try:
+            t["gen"] += thread_ticks(gpid)
+        except OSError:
+            t["gen"] = None
+            break
+    t["steal"] = cpu_steal(main_cpus)
+    return t
+
+
+def _main_cpus(pids) -> Optional[set]:
+    """CPUs the main threads are confined to, or None when not confined."""
+    cpus = set()
+    for pid in pids:
+        try:
+            affinity = os.sched_getaffinity(pid)
+        except OSError:
+            return None
+        if len(affinity) >= (os.cpu_count() or 0):
+            return None
+        cpus |= affinity
+    return cpus or None
+
+
+def _run_window(parts, probe, opts, expect_keys, window, settle):
+    handles = []
     try:
+        for generator, req in parts:
+            handles.append(generator.start(req))
+        expected_clients = sum(g.expected_connections(req.scenario) for g, req in parts)
         deadline = time.time() + opts["ready_timeout"]
         last_cmds, snap = None, None
         while True:
             time.sleep(1)
-            if not handle.alive():
-                raise GeneratorError(
-                    f"{generator.name} exited before the load was up: "
-                    f"{_stderr_tail(handle.stderr_path)}"
-                )
+            for (generator, _), handle in zip(parts, handles):
+                if not handle.alive():
+                    raise GeneratorError(
+                        f"{generator.name} exited before the load was up: "
+                        f"{_stderr_tail(handle.stderr_path)}"
+                    )
             snap = probe.snapshot()
             flowing = last_cmds is not None and snap["cmds"] > last_cmds + 100
             last_cmds = snap["cmds"]
-            # The probe's own connection counts in connected_clients.
             if (
-                snap["clients"] - 1 >= expected_clients
+                snap["clients"] >= expected_clients
                 and snap["keys"] >= expect_keys
                 and flowing
             ):
                 break
             if time.time() > deadline:
                 raise GeneratorError(
-                    f"load never came up: clients={snap['clients'] - 1}/{expected_clients} "
+                    f"load never came up: clients={snap['clients']}/{expected_clients} "
                     f"keys={snap['keys']}/{expect_keys}"
                 )
         time.sleep(settle)
 
-        pid = snap["pid"]
-        local = probe.local and pid and Path(f"/proc/{pid}").exists()
-        gen_pid = handle.proc.pid
+        pids = _local_pids(probe, snap["pids"])
+        gen_pids = [h.proc.pid for h in handles]
+        main_cpus = _main_cpus(pids) if pids else None
 
         def ticks():
-            if not local:
-                return None
-            names = thread_names(pid)
-            t = {"main": thread_ticks(pid, pid)}
-            t["io"] = sum(
-                thread_ticks(pid, tid)
-                for tid, n in names.items()
-                if io_thread_index(n) is not None
-            )
-            try:
-                t["gen"] = thread_ticks(gen_pid)
-            except OSError:
-                t["gen"] = None
-            try:
-                t["sched"] = thread_sched(pid, pid)
-            except (OSError, IndexError, ValueError):
-                t["sched"] = None
-            t["steal"] = cpu_steal(main_cpus)
-            return t
-
-        main_cpus = None
-        if local:
-            try:
-                affinity = os.sched_getaffinity(pid)
-                main_cpus = affinity if len(affinity) < (os.cpu_count() or 0) else None
-            except OSError:
-                pass
+            return _ticks(pids, gen_pids, main_cpus) if pids else None
 
         a, ta = probe.snapshot(), ticks()
         perf_text, perf_status = "", "off"
         if opts.get("perf_counters"):
-            if not local:
+            if not pids:
                 perf_status = "unavailable: server not local"
+            elif len(pids) > 1:
+                perf_status = "unavailable: more than one server"
             elif not shutil.which("perf"):
                 perf_status = "unavailable: perf not installed"
             else:
                 r = subprocess.run(
-                    [
-                        "perf",
-                        "stat",
-                        "-e",
-                        PERF_EVENTS,
-                        "-t",
-                        str(pid),
-                        "--",
-                        "sleep",
-                        str(window),
-                    ],
+                    ["perf", "stat", "-e", PERF_EVENTS, "-t", str(pids[0]), "--"]
+                    + ["sleep", str(window)],
                     capture_output=True,
                     text=True,
                 )
-                perf_text, perf_status = r.stderr, (
-                    "ok" if r.returncode == 0 else "failed"
-                )
+                perf_text = r.stderr
+                perf_status = "ok" if r.returncode == 0 else "failed"
         if not perf_text:
             time.sleep(window)
         b, tb = probe.snapshot(), ticks()
-        ended_early = not handle.alive()
+        ended_early = [not h.alive() for h in handles]
 
-        if generator.stops_at_window_edge:
+        if any(g.stops_at_window_edge for g, _ in parts):
             time.sleep(1.2)  # let the last in-window sample flush
-            generator.stop(handle)
-        else:
-            generator.wait(handle, timeout_s=req.duration_s + 30)
-        asserts = _server_asserts(probe.client)
+        for (generator, req), handle in zip(parts, handles):
+            if generator.stops_at_window_edge:
+                generator.stop(handle)
+            else:
+                generator.wait(handle, timeout_s=req.duration_s + 30)
+        asserts = _server_asserts(probe.clients())
     except BaseException:
-        generator.stop(handle)
+        for (generator, _), handle in zip(parts, handles):
+            generator.stop(handle)
         raise
-
-    result = generator.parse(handle, (a["t"], b["t"]))
-    if result is None:
-        logging.error(f"{generator.name} produced no parsable output")
-        return None
 
     span = b["t"] - a["t"]
     cmds = b["cmds"] - a["cmds"]
-    extra = {
-        "generator": generator.name,
-        "generator_version": generator.version(),
-        "generator_argv": " ".join(handle.argv),
+    shared = {
         "server_ops_s": cmds / span,
         "window_s": round(span, 3),
-        "connected_clients": b["clients"] - 1,
+        "connected_clients": b["clients"],
         "expected_clients": expected_clients,
         "server_asserts": asserts,
         "server_version": b.get("version"),
-        "generator_ended_early": ended_early,
         "perf_status": perf_status,
-        **result.extra,
     }
+    if len(snap["pids"]) > 1:
+        shared["server_nodes"] = len(snap["pids"])
+    # For a cluster, main-thread figures are the least busy node's (every
+    # node must be saturated) and the worst disturbance of any node.
     if a["active_main_s"] is not None and b["active_main_s"] is not None:
-        extra["main_busy_pct"] = (b["active_main_s"] - a["active_main_s"]) / span * 100
-        extra["main_busy_source"] = "used_active_time_main_thread"
+        busy = [
+            (y - x) / span * 100 for x, y in zip(a["active_main_s"], b["active_main_s"])
+        ]
+        shared["main_busy_pct"] = min(busy)
+        shared["main_busy_source"] = "used_active_time_main_thread"
+        if len(busy) > 1:
+            shared["main_busy_pct_max"] = max(busy)
     if ta and tb:
-        extra["main_cpu_pct"] = (tb["main"] - ta["main"]) / CLK_TCK / span * 100
-        extra["io_threads_cores"] = (tb["io"] - ta["io"]) / CLK_TCK / span
+        cpu = [(tb["main"][p] - ta["main"][p]) / CLK_TCK / span * 100 for p in pids]
+        shared["main_cpu_pct"] = min(cpu)
+        shared["io_threads_cores"] = (tb["io"] - ta["io"]) / CLK_TCK / span
         if ta["gen"] is not None and tb["gen"] is not None:
-            extra["generator_cores"] = (tb["gen"] - ta["gen"]) / CLK_TCK / span
-        if "main_busy_pct" not in extra:
-            extra["main_busy_pct"] = extra["main_cpu_pct"]
-            extra["main_busy_source"] = "main thread cpu"
-        if ta["sched"] and tb["sched"]:
-            extra["main_runq_wait_pct"] = (
-                (tb["sched"]["wait_ns"] - ta["sched"]["wait_ns"]) / 1e9 / span * 100
+            shared["generator_cores"] = (tb["gen"] - ta["gen"]) / CLK_TCK / span
+        if "main_busy_pct" not in shared:
+            shared["main_busy_pct"] = shared["main_cpu_pct"]
+            shared["main_busy_source"] = "main thread cpu"
+        sched = [p for p in pids if p in ta["sched"] and p in tb["sched"]]
+        if sched:
+            shared["main_runq_wait_pct"] = max(
+                (tb["sched"][p]["wait_ns"] - ta["sched"][p]["wait_ns"])
+                / 1e9
+                / span
+                * 100
+                for p in sched
             )
-            extra["main_nvcsw_per_s"] = (
-                tb["sched"]["nvcsw"] - ta["sched"]["nvcsw"]
-            ) / span
+            shared["main_nvcsw_per_s"] = max(
+                (tb["sched"][p]["nvcsw"] - ta["sched"][p]["nvcsw"]) / span
+                for p in sched
+            )
         if ta["steal"] and tb["steal"] and tb["steal"][1] > ta["steal"][1]:
-            extra["steal_pct"] = (
+            shared["steal_pct"] = (
                 (tb["steal"][0] - ta["steal"][0])
                 / (tb["steal"][1] - ta["steal"][1])
                 * 100
             )
-            extra["steal_scope"] = "main cpus" if main_cpus else "host"
+            shared["steal_scope"] = "main cpus" if main_cpus else "host"
     if perf_text:
-        extra.update(parse_perf_stat(perf_text, cmds))
-    return {"row": result.row, "extra": extra, "stdout": result.stdout}
+        shared.update(parse_perf_stat(perf_text, cmds))
+
+    out_parts = []
+    for (generator, req), handle, early in zip(parts, handles, ended_early):
+        result = generator.parse(handle, (a["t"], b["t"]))
+        if result is None:
+            logging.error(f"{generator.name} produced no parsable output")
+            out_parts.append(None)
+            continue
+        out_parts.append(
+            {
+                "row": result.row,
+                "extra": {
+                    "generator": generator.name,
+                    "generator_version": generator.version(),
+                    "generator_argv": " ".join(handle.argv),
+                    "generator_ended_early": early,
+                    **result.extra,
+                },
+            }
+        )
+    return {"extra": shared, "parts": out_parts}
 
 
 def stamp_validity(extra: dict, opts: dict, scenario: dict) -> dict:
