@@ -1,14 +1,23 @@
 """Both generators against a TLS-only server."""
 
+import json
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from tests.integration.real_valkey import (
     CACHECANNON,
+    PROJECT_ROOT,
+    VALKEY_DIR,
     VALKEY_TLS_DIR,
     free_port,
     make_checkout,
     read_rows,
     requires_cachecannon,
+    requires_valkey,
     requires_valkey_tls,
     run_benchmark,
 )
@@ -82,3 +91,39 @@ def test_tls_rows_from_both_generators(tmp_path, measured):
     assert rows["tls-cc"]["generator_errors"] == 0
     toml = next((tmp_path / "results" / "HEAD" / "runs").glob("tls-cc_*/*.toml"))
     assert "tls = true" in toml.read_text()
+
+
+@requires_valkey
+def test_plain_valkey_benchmark_is_refused_before_start(tmp_path):
+    """A TLS config given a valkey-benchmark built without TLS exits before
+    any server starts, naming the cause."""
+    checkout = make_checkout(tmp_path / "valkey", source=VALKEY_TLS_DIR)
+    plain = Path(VALKEY_DIR) / "src" / "valkey-benchmark"
+    port = free_port()
+    cfg = _config(port)
+    cfg["test_groups"][0]["scenarios"] = cfg["test_groups"][0]["scenarios"][:1]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps([cfg]))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "benchmark.py",
+            "--config",
+            str(config_path),
+            "--valkey-path",
+            str(checkout),
+            "--valkey-benchmark-path",
+            str(plain),
+            "--results-dir",
+            str(tmp_path / "results"),
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 1
+    assert "built without TLS" in result.stdout
+    with pytest.raises(OSError):
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+    assert read_rows(tmp_path) == []

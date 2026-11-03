@@ -7,6 +7,7 @@ import logging
 import platform
 import re
 import shlex
+import subprocess
 from itertools import product
 from pathlib import Path
 from typing import List, Optional
@@ -1217,11 +1218,41 @@ def _with_cli_generator_paths(cfg: dict, args: argparse.Namespace) -> dict:
 
 def _uses_generator(cfg: dict, name: str) -> bool:
     default = cfg.get("generator", DEFAULT_GENERATOR)
-    return any(
-        sc.get("generator", default) == name
-        for group in cfg.get("test_groups", [])
-        for sc in group.get("scenarios", [])
-    ) or (name == DEFAULT_GENERATOR and "test_groups" not in cfg)
+    for group in cfg.get("test_groups", []):
+        for sc in group.get("scenarios", []):
+            own = sc.get("generator", default)
+            subs = sc.get("writes", []) + sc.get("reads", [])
+            if any(sub.get("generator", own) == name for sub in subs or [sc]):
+                return True
+    return name == DEFAULT_GENERATOR and "test_groups" not in cfg
+
+
+def benchmark_supports_tls(path: str) -> bool:
+    """True when valkey-benchmark at path was built with TLS (BUILD_TLS)."""
+    try:
+        out = subprocess.run(
+            [str(path), "--help"], capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ValueError(f"cannot run valkey-benchmark at {path}: {e}") from e
+    return "--tls" in out.stdout + out.stderr
+
+
+def check_benchmark_tls(configs: List[dict], benchmark_path) -> None:
+    """Fail before any build or server start when a TLS config would run
+    valkey-benchmark from a build without TLS."""
+    if benchmark_path is None or not Path(benchmark_path).exists():
+        return
+    needs = [
+        c
+        for c in configs
+        if c.get("tls_mode") and _uses_generator(c, DEFAULT_GENERATOR)
+    ]
+    if needs and not benchmark_supports_tls(benchmark_path):
+        raise ValueError(
+            f"tls_mode is on but {benchmark_path} was built without TLS; "
+            "build valkey-benchmark with BUILD_TLS=yes"
+        )
 
 
 def _write_run_manifest(results_dir, commit_id, valkey_dir, cfg, benchmark_path):
@@ -1392,6 +1423,15 @@ def main() -> None:
 
     if not configs_list:
         print("ERROR: No configurations found in config file")
+        sys.exit(1)
+
+    benchmark_path = args.valkey_benchmark_path or (
+        args.valkey_path / "src" / "valkey-benchmark" if args.valkey_path else None
+    )
+    try:
+        check_benchmark_tls(configs_list, benchmark_path)
+    except ValueError as e:
+        print(f"ERROR: {e}")
         sys.exit(1)
 
     # Use first config for initial setup
