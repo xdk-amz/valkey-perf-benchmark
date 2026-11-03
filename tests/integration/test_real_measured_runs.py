@@ -126,6 +126,8 @@ def test_fixed_rate_is_checked_against_target(run):
     row = rows["rate-cc"]
     assert row["valid"] is True, row["invalid_reasons"]
     assert row["server_ops_s"] == pytest.approx(20000, rel=0.5)
+    assert row["rate"] == 20000
+    assert "rate" not in rows["get-cc"]
 
 
 def test_saturation_gate_marks_light_load_invalid(run):

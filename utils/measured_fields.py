@@ -109,6 +109,7 @@ FIELD_TYPES = {
             "server_nodes",
             "run_index",
             "order_slot",
+            "rate",
         )
     },
     "valid": "BOOLEAN",

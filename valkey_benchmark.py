@@ -1440,6 +1440,8 @@ class ClientRunner:
 
         if extra:
             metrics.update(extra)
+        if scenario.get("rate"):
+            metrics["rate"] = int(scenario["rate"])
         self._stamp_provenance(metrics)
 
         if origin_simple:
@@ -1742,6 +1744,8 @@ class ClientRunner:
                 )
             else:
                 metric.update(extra)
+                if sub.get("rate"):
+                    metric["rate"] = int(sub["rate"])
                 self._stamp_provenance(metric)
             rows.append(metric)
         return rows
