@@ -41,9 +41,16 @@ class ValkeyBenchmarkGenerator(LoadGenerator):
         sc["duration"] = req.duration_s
         sc.pop("requests", None)
         sc.pop("warmup_inline", None)
-        return self.command_builder(
+        argv = self.command_builder(
             scenario=sc, cpu_range=req.cpu_range, seed_val=req.seed, port=req.port
         )
+        if req.auth_password:
+            at = argv.index(self.binary) + 1
+            auth = ["-a", req.auth_password]
+            if req.auth_user:
+                auth = ["--user", req.auth_user, *auth]
+            argv[at:at] = auth
+        return argv
 
     def parse(
         self, handle: RunHandle, window: Optional[tuple]

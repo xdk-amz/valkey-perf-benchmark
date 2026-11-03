@@ -55,7 +55,7 @@ def validate_measurement(value) -> None:
         return
     if not isinstance(value, dict):
         raise ValueError("'measurement' must be a boolean or an object")
-    known = set(DEFAULTS) | {"require_main_busy_pct"}
+    known = set(DEFAULTS) | {"require_main_busy_pct", "acl"}
     unknown = sorted(set(value) - known)
     if unknown:
         raise ValueError(f"'measurement' does not support key(s): {unknown}")
@@ -66,6 +66,10 @@ def validate_measurement(value) -> None:
         v = value["require_main_busy_pct"]
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 100:
             raise ValueError("'measurement.require_main_busy_pct' must be in (0, 100]")
+    if "acl" in value:
+        acl = value["acl"]
+        if not isinstance(acl, dict) or not acl.get("user") or not acl.get("password"):
+            raise ValueError("'measurement.acl' needs 'user' and 'password'")
 
 
 # ---------- /proc helpers (local server only) --------------------------------
@@ -87,7 +91,7 @@ def thread_ticks(pid: int, tid: Optional[int] = None) -> float:
     return float(fields[11]) + float(fields[12])
 
 
-def _io_thread_index(name: str) -> Optional[int]:
+def io_thread_index(name: str) -> Optional[int]:
     m = re.match(r"io_thd_(\d+)$", name)
     return int(m.group(1)) if m else None
 
@@ -160,6 +164,26 @@ class ServerProbe:
         }
 
 
+# ---------- ACL user -----------------------------------------------------------
+
+
+def apply_acl(client, acl: dict) -> None:
+    """Create the bench user with a per-key pattern walk, then disable default.
+
+    ``~*`` is short-circuited by the server, so the default patterns force a
+    real key-pattern check on every command.
+    """
+    keys = acl.get("keys", ["~x:*", "~?*"])
+    client.execute_command(
+        "ACL", "SETUSER", acl["user"], "on", f">{acl['password']}", *keys, "&*", "+@all"
+    )
+    client.execute_command("ACL", "SETUSER", "default", "off")
+
+
+def restore_default_user(client) -> None:
+    client.execute_command("ACL", "SETUSER", "default", "on")
+
+
 # ---------- measured run -----------------------------------------------------
 
 
@@ -215,20 +239,39 @@ def run_measured(
     opts: dict,
     *,
     expect_keys: int = 0,
+    admin_client_factory: Optional[Callable] = None,
 ) -> Optional[dict]:
-    """Run one scenario under the window protocol; returns row and extra fields."""
+    """Run one scenario under the window protocol; returns row and extra fields.
+
+    With ``opts["acl"]`` the bench user is created through
+    ``admin_client_factory`` (a default-user client) before the run, and the
+    default user is re-enabled afterwards through the probe, which then
+    authenticates as the bench user.
+    """
     window, settle = opts["window"], opts["settle"]
     expected_clients = generator.expected_connections(req.scenario)
     if generator.stops_at_window_edge:
         req.duration_s = opts["ready_timeout"] + settle + window + 30
     else:
         req.duration_s = 2 + settle + window + 2
+    acl = opts.get("acl")
+    if acl:
+        admin = admin_client_factory()
+        try:
+            apply_acl(admin, acl)
+        finally:
+            admin.close()
+    probe.reset()
     try:
         return _run_window(
             generator, req, probe, opts, expected_clients, expect_keys, window, settle
         )
     finally:
-        probe.reset()
+        try:
+            if acl:
+                restore_default_user(probe.client)
+        finally:
+            probe.reset()
 
 
 def _run_window(
@@ -274,7 +317,7 @@ def _run_window(
             t["io"] = sum(
                 thread_ticks(pid, tid)
                 for tid, n in names.items()
-                if _io_thread_index(n) is not None
+                if io_thread_index(n) is not None
             )
             try:
                 t["gen"] = thread_ticks(gen_pid)

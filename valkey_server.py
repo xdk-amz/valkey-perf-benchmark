@@ -134,6 +134,7 @@ class ServerLauncher:
         self.module_path = None  # Will be set during launch
         self.cluster_nodes = []  # Track multiple node processes
         self.port = DEFAULT_PORT
+        self.thread_layout = None  # thread -> CPUs after thread_pinning
 
     def _create_client(
         self, tls_mode: bool, host: str = "127.0.0.1", port: int = DEFAULT_PORT
@@ -626,6 +627,7 @@ class ServerLauncher:
         self.config = config
         self.module_path = module_path
         self.port = (config or {}).get("port", DEFAULT_PORT)
+        self.thread_layout = None
         # Reset node tracking so a restart doesn't accumulate stale entries
         self.cluster_nodes = []
 
@@ -680,10 +682,23 @@ class ServerLauncher:
                 if cluster_mode:
                     self._setup_cluster(tls_mode=tls_mode)
                 logging.info("Valkey server launched successfully.")
+                if config and config.get("thread_pinning"):
+                    self._pin_threads(tls_mode, config["thread_pinning"], io_threads)
         except Exception as e:
             logging.error(f"Failed to launch Valkey server: {e}")
             self.shutdown(tls_mode)
             raise
+
+    def _pin_threads(self, tls_mode: bool, spec: dict, io_threads) -> None:
+        """Pin main and IO threads to their CPUs (see thread_pinning)."""
+        from thread_pinning import pin_server_threads
+
+        with self._client_context(tls_mode) as client:
+            pid = int(client.info("server")["process_id"])
+        # IO threads start with the server; give them a moment to be named.
+        time.sleep(0.3)
+        self.thread_layout = pin_server_threads(pid, spec, io_threads)
+        logging.info(f"Pinned server threads: {self.thread_layout}")
 
     def shutdown(self, tls_mode: bool) -> None:
         """Gracefully shutdown the Valkey server."""

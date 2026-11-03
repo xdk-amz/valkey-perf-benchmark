@@ -490,6 +490,28 @@ drops invalid rows and reports how many it dropped.
 `"perf_counters": true` adds per-command cycles, instructions, IPC and L1 and
 branch misses from `perf stat` on the server over the window.
 
+### Thread Pinning (`thread_pinning`) and the ACL User (`measurement.acl`)
+
+```json
+"thread_pinning": {"main": "2", "io_threads": "3-4", "other": "1"},
+"measurement": {"acl": {"user": "bench", "password": "...", "keys": ["~x:*", "~?*"]}}
+```
+
+`thread_pinning` gives the main thread and each IO thread its own CPU after
+every server (re)start: IO thread N gets the Nth CPU of `io_threads` (they
+share the list when it is shorter than the thread count), and `other` (bio,
+jemalloc) gets its own set. Each affinity is read back and a mismatch fails
+the launch. Rows carry the layout in `thread_pinning` and a warning in
+`pinning_warnings` when irqbalance is active. Local servers only.
+
+`measurement.acl` runs measured scenarios as an ACL user. Before each run the
+user is created with the given key patterns (default `~x:* ~?*`, which forces
+a real pattern check on every key, unlike `~*`) and the default user is
+disabled; both generators authenticate as the user; the default user is
+re-enabled afterwards. Rows carry `acl_user`, which is a comparison dimension.
+cachecannon needs a build that supports `target.auth_user` and
+`target.auth_password`.
+
 ### Post-run Commands (`post_commands`)
 
 `post_commands` is a list of Valkey commands that runs **after** a benchmark run

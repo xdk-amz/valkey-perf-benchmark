@@ -31,6 +31,7 @@ def _row(**kw):
         "valid": True,
         "invalid_reasons": "",
         "generator_argv": "/bin/cc x.toml",
+        "thread_pinning": "main=2",
         **kw,
     }
 
@@ -59,6 +60,7 @@ def test_later_rows_fit_columns_typed_from_the_first(pg_conn):
             invalid_reasons="main thread waited for a CPU 12.3% of the window "
             "(> 5.0%): disturbed; generator errors: 4; clients 1 < 8 " * 3,
             generator_argv="taskset -c 8-15 /opt/valkey/src/valkey-benchmark " * 8,
+            thread_pinning="main=2,io_thd_1=3,io_thd_2=4,bio_close_file=1," * 3,
         ),
     ]
     assert push_to_postgres(rows, pg_conn, table) == 2

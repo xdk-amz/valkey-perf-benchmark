@@ -30,6 +30,7 @@ from generators import (
     run_for_duration,
 )
 from measurement import ServerProbe, measurement_options, run_measured, stamp_validity
+from thread_pinning import pinning_warnings
 from metrics_sampler import is_local_address
 
 # Constants
@@ -1442,10 +1443,12 @@ class ClientRunner:
 
     # ---------- measured runs ----------------------------------------------
 
-    def _probe_client(self):
+    def _probe_client(self, user=None, password=None):
         return valkey.Valkey(
             host=self.target_ip,
             port=self.config.get("port", DEFAULT_PORT),
+            username=user,
+            password=password,
             decode_responses=True,
             socket_timeout=30,
             socket_connect_timeout=10,
@@ -1466,14 +1469,21 @@ class ClientRunner:
         """
         opts = measurement_options(self.config)
         generator = self._generator(self._generator_name(scenario))
-        probe = ServerProbe(self._probe_client, local=is_local_address(self.target_ip))
+        acl = opts.get("acl")
+        user, password = (acl["user"], acl["password"]) if acl else (None, None)
+        probe = ServerProbe(
+            lambda: self._probe_client(user, password),
+            local=is_local_address(self.target_ip),
+        )
         req = self._generator_request(scenario, seed_val, duration_s=0)
+        req.auth_user, req.auth_password = user, password
         out = run_measured(
             generator,
             req,
             probe,
             opts,
             expect_keys=self._expected_keys(generator, scenario),
+            admin_client_factory=self._probe_client,
         )
         if out is None:
             return None
@@ -1486,6 +1496,13 @@ class ClientRunner:
     def _measured_metadata(self, extra: dict) -> dict:
         """Run metadata stamped on every measured row."""
         extra["run_index"] = self.current_run
+        layout = getattr(self.server_launcher, "thread_layout", None)
+        if layout:
+            extra["thread_pinning"] = ",".join(f"{k}={v}" for k, v in layout.items())
+            extra["pinning_warnings"] = "; ".join(pinning_warnings())
+        acl = measurement_options(self.config).get("acl")
+        if acl:
+            extra["acl_user"] = acl["user"]
         return extra
 
     def _run_post_commands(self, scenario: dict) -> None:

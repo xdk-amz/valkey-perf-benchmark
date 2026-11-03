@@ -28,6 +28,8 @@ MEASURED_FIELDS = frozenset(
         "valid",
         "invalid_reasons",
         "run_index",
+        "thread_pinning",
+        "pinning_warnings",
         "cyc_per_cmd",
         "ins_per_cmd",
         "ipc",
@@ -104,7 +106,10 @@ FIELD_TYPES = {
             "generator_argv",
             "generator_latency_scope",
             "main_busy_source",
+            "thread_pinning",
+            "pinning_warnings",
             "perf_status",
+            "acl_user",
         )
     },
 }
