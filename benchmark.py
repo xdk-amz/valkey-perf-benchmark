@@ -30,6 +30,7 @@ from valkey_benchmark import (
 from benchmark_build import BenchmarkBuilder
 from generators import DEFAULT_GENERATOR, GENERATORS, GENERATOR_NAMES
 from measurement import validate_measurement
+from thread_pinning import validate_thread_pinning
 from samplers import SOURCES
 from utils.cpu_utils import (
     parse_core_range,
@@ -77,6 +78,7 @@ OPTIONAL_CONF_KEYS = [
     "generator",
     "generators",
     "measurement",
+    "thread_pinning",
 ]
 
 BUILD_ARG_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -598,6 +600,8 @@ def validate_config(cfg: dict) -> None:
 
     if "measurement" in cfg:
         validate_measurement(cfg["measurement"])
+    if "thread_pinning" in cfg:
+        validate_thread_pinning(cfg["thread_pinning"])
 
     if "cluster_mode" in cfg and not isinstance(cfg["cluster_mode"], list):
         cfg["cluster_mode"] = parse_bool(cfg["cluster_mode"])
