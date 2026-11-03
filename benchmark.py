@@ -286,6 +286,14 @@ def parse_args() -> argparse.Namespace:
         "Used with configs that have cluster_mode as array (e.g., [false, true]).",
     )
 
+    parser.add_argument(
+        "--valkey-repo-url",
+        default=None,
+        metavar="URL",
+        help="Repository to clone commits from (default: valkey-io/valkey). "
+        "A local path or fork URL lets local runs build unpublished commits.",
+    )
+
     args, unknown = parser.parse_known_args()
     if unknown:
         parser.error(f"Unrecognized arguments: {' '.join(unknown)}")
@@ -854,6 +862,7 @@ def run_benchmark_matrix(
         tls_mode=cfg["tls_mode"],
         valkey_path=str(valkey_dir),
         build_args=cfg.get("build_args", []),
+        repo_url=getattr(args, "valkey_repo_url", None),
     )
     if not args.use_running_server:
         server_binary = valkey_dir / "src" / "valkey-server"
