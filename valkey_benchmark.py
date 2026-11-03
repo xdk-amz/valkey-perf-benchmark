@@ -456,6 +456,8 @@ class ClientRunner:
         effective_runs = self._get_effective_runs()
         groups_to_run = self.config.get("groups_to_run")
         scenario_filter = self.config.get("scenario_filter")
+        # Set by interleaved-cell order: the (group, scenario id) pairs to run.
+        cell_filter = self.config.get("cell_filter")
 
         for test_group in self.config.get("test_groups", []):
             group_id = test_group.get("group", "unknown")
@@ -478,6 +480,11 @@ class ClientRunner:
                     logging.info(f"=== Group {group_id}: {group_description or ''} ===")
 
                 for scenario in test_group.get("scenarios", []):
+                    if (
+                        cell_filter
+                        and (group_id, scenario.get("id")) not in cell_filter
+                    ):
+                        continue
                     # Cluster mode is scalarized only at execution time.
                     test_cmd = scenario.get("test")
                     if test_cmd in ("MSET", "MGET") and self.cluster_mode:
