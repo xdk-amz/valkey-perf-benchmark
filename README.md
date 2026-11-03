@@ -456,6 +456,40 @@ does not report (`avg_latency_ms`, `min_latency_ms`, `p95_latency_ms`) are
 written as null. Each row records `generator`, `generator_version` and
 `generator_argv`.
 
+### Measured Runs (`measurement`)
+
+With `"measurement"` set, every scenario in `test_groups` runs under a fixed
+measurement window instead of relying on the generator's own report:
+
+```json
+"measurement": {"window": 30, "settle": 5, "require_main_busy_pct": 98}
+```
+
+The harness starts the generator, waits up to `ready_timeout` (60 s) until
+every client is connected, the generator's keys are loaded and commands are
+flowing, waits `settle` seconds, then reads `INFO` at both edges of a `window`
+second window (defaults 3 s settle, 6 s window). The row gains:
+
+| Field | Meaning |
+|---|---|
+| `server_ops_s` | `total_commands_processed` delta over the measured span |
+| `window_s` | measured span in seconds |
+| `main_busy_pct` | `used_active_time_main_thread` delta over the span (main thread CPU time when the server lacks that field) |
+| `main_cpu_pct`, `io_threads_cores`, `generator_cores` | CPU time from `/proc`, local servers only |
+| `connected_clients`, `server_asserts` | clients during the window, assertions in the server log |
+| `valid`, `invalid_reasons` | validity of the run |
+
+A run is invalid when the generator reported errors or timeouts, connected
+fewer clients than asked, ended inside the window, a fixed-rate scenario
+served more than `rate_tolerance_pct` (5) off its `rate`, or the server log
+shows an assertion. `require_main_busy_pct` is an opt-in saturation gate: a
+closed-loop run whose main thread was less busy than that is invalid, since
+it measured the client rather than the server. `compare_benchmark_results.py`
+drops invalid rows and reports how many it dropped.
+
+`"perf_counters": true` adds per-command cycles, instructions, IPC and L1 and
+branch misses from `perf stat` on the server over the window.
+
 ### Post-run Commands (`post_commands`)
 
 `post_commands` is a list of Valkey commands that runs **after** a benchmark run

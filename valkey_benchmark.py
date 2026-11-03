@@ -26,8 +26,11 @@ from generators import (
     DEFAULT_GENERATOR,
     GENERATORS,
     GeneratorRequest,
+    ValkeyBenchmarkGenerator,
     run_for_duration,
 )
+from measurement import ServerProbe, measurement_options, run_measured, stamp_validity
+from metrics_sampler import is_local_address
 
 # Constants
 VALKEY_BENCHMARK = "src/valkey-benchmark"
@@ -1262,6 +1265,8 @@ class ClientRunner:
 
     def _execute_benchmark_run(self, scenario, seed_val):
         """Return a process or an aggregated row for a non-mixed scenario."""
+        if measurement_options(self.config):
+            return None, self._run_measured_scenario(scenario, seed_val)
         if self._generator_name(scenario) != DEFAULT_GENERATOR:
             return None, self._run_generator_scenario(scenario, seed_val)
         if self._should_use_parallel(scenario):
@@ -1383,6 +1388,11 @@ class ClientRunner:
         )
 
     def _generator(self, name: str):
+        if name == DEFAULT_GENERATOR:
+            return ValkeyBenchmarkGenerator(
+                self.valkey_benchmark_path,
+                command_builder=self._build_benchmark_command,
+            )
         if name not in GENERATORS:
             raise ValueError(f"Unknown generator {name!r}")
         options = dict(self.config.get("generators", {}).get(name, {}))
@@ -1427,6 +1437,54 @@ class ClientRunner:
                 **result.extra,
             },
         }
+
+    # ---------- measured runs ----------------------------------------------
+
+    def _probe_client(self):
+        return valkey.Valkey(
+            host=self.target_ip,
+            port=self.config.get("port", DEFAULT_PORT),
+            decode_responses=True,
+            socket_timeout=30,
+            socket_connect_timeout=10,
+            **self._tls_kwargs(),
+        )
+
+    def _expected_keys(self, generator, scenario: dict) -> int:
+        """Keys the generator loads itself before the window may open."""
+        if not getattr(generator, "prefills", lambda sc: False)(scenario):
+            return 0
+        return int(scenario.get("keyspacelen", self.config.get("keyspacelen", [0])[0]))
+
+    def _run_measured_scenario(self, scenario: dict, seed_val) -> Optional[dict]:
+        """Run one scenario under the measurement window; returns its row.
+
+        Throughput and main-thread busy time come from the server's own
+        counters at the window edges; the generator's report supplies latency.
+        """
+        opts = measurement_options(self.config)
+        generator = self._generator(self._generator_name(scenario))
+        probe = ServerProbe(self._probe_client, local=is_local_address(self.target_ip))
+        req = self._generator_request(scenario, seed_val, duration_s=0)
+        out = run_measured(
+            generator,
+            req,
+            probe,
+            opts,
+            expect_keys=self._expected_keys(generator, scenario),
+        )
+        if out is None:
+            return None
+        extra = self._measured_metadata(out["extra"])
+        extra["duration"] = opts["window"]
+        extra["benchmark_mode"] = "measured"
+        stamp_validity(extra, opts, scenario)
+        return {**out["row"], GENERATOR_EXTRA: extra}
+
+    def _measured_metadata(self, extra: dict) -> dict:
+        """Run metadata stamped on every measured row."""
+        extra["run_index"] = self.current_run
+        return extra
 
     def _run_post_commands(self, scenario: dict) -> None:
         """Run post_commands once a scenario's benchmark run has finished."""
