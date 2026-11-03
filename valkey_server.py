@@ -399,7 +399,11 @@ class ServerLauncher:
         module_path: Optional[str] = None,
     ) -> None:
         """Start Valkey server."""
-        log_file = f"{Path.cwd()}/{self.results_dir}/valkey_log_cluster_{'enabled' if cluster_mode else 'disabled'}_tls_{'enabled' if tls_mode else 'disabled'}.log"
+        log_file = str(
+            Path.cwd()
+            / self.results_dir
+            / f"valkey_log_cluster_{'enabled' if cluster_mode else 'disabled'}_tls_{'enabled' if tls_mode else 'disabled'}.log"
+        )
 
         cmd = self._build_server_command(
             port=self.port,
@@ -499,7 +503,11 @@ class ServerLauncher:
         node_id: int,
     ) -> None:
         """Launch a single cluster node."""
-        log_file = f"{Path.cwd()}/{self.results_dir}/valkey_cluster_node{node_id}_port{port}.log"
+        log_file = str(
+            Path.cwd()
+            / self.results_dir
+            / f"valkey_cluster_node{node_id}_port{port}.log"
+        )
 
         cmd = self._build_server_command(
             port=port,
