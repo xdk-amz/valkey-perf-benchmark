@@ -183,3 +183,41 @@ class TestRunForDuration:
         req = _req(tmp_path, {"test": "GET"})
         req.duration_s = 0
         assert run_for_duration(gen, req, slack_s=0.5) is None
+
+
+class TestValkeyBenchmarkBackend:
+    def _builder(self, scenario, cpu_range=None, seed_val=None, port=None):
+        argv = ["/bin/vb", "-p", str(port), "--duration", str(scenario["duration"])]
+        return argv + ["-t", scenario["test"], "--csv"]
+
+    def test_argv_uses_window_duration(self, tmp_path):
+        from generators import ValkeyBenchmarkGenerator
+
+        gen = ValkeyBenchmarkGenerator("/bin/vb", command_builder=self._builder)
+        sc = {"test": "GET", "requests": 100, "warmup_inline": 5}
+        argv = gen.build_argv(_req(tmp_path, sc))
+        assert argv[argv.index("--duration") + 1] == "20"
+        assert argv[argv.index("-p") + 1] == "16379"
+
+    def test_rejects_rate_and_mix(self):
+        from generators import ValkeyBenchmarkGenerator
+
+        gen = ValkeyBenchmarkGenerator("/bin/vb", command_builder=self._builder)
+        assert gen.unsupported({"test": "GET", "rate": 10})
+        assert gen.unsupported({"mix": {"get": 1}})
+
+    def test_parse_csv(self, tmp_path):
+        from generators import ValkeyBenchmarkGenerator
+
+        out, err = tmp_path / "o", tmp_path / "e"
+        out.write_text(
+            '"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms",'
+            '"p95_latency_ms","p99_latency_ms","max_latency_ms"\n'
+            '"GET","12345.00","0.1","0.01","0.1","0.2","0.3","1.0"\n'
+        )
+        err.write_text("")
+        gen = ValkeyBenchmarkGenerator("/bin/vb", command_builder=self._builder)
+        handle = RunHandle(None, ["/bin/vb", "-t", "GET"], out, err, 0.0, "GET")
+        result = gen.parse(handle, (0, 1))
+        assert result.row["rps"] == "12345.00"
+        assert result.extra["generator_errors"] == 0

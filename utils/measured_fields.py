@@ -16,6 +16,25 @@ MEASURED_FIELDS = frozenset(
         "p90_latency_ms",
         "p999_latency_ms",
         "p9999_latency_ms",
+        "server_ops_s",
+        "window_s",
+        "main_busy_pct",
+        "main_busy_source",
+        "main_cpu_pct",
+        "io_threads_cores",
+        "generator_cores",
+        "connected_clients",
+        "server_asserts",
+        "valid",
+        "invalid_reasons",
+        "run_index",
+        "cyc_per_cmd",
+        "ins_per_cmd",
+        "ipc",
+        "l1i_miss_per_cmd",
+        "l1d_miss_per_cmd",
+        "br_miss_per_cmd",
+        "perf_status",
     }
 )
 
@@ -48,6 +67,18 @@ FIELD_TYPES = {
             "p90_latency_ms",
             "p999_latency_ms",
             "p9999_latency_ms",
+            "server_ops_s",
+            "window_s",
+            "main_busy_pct",
+            "main_cpu_pct",
+            "io_threads_cores",
+            "generator_cores",
+            "cyc_per_cmd",
+            "ins_per_cmd",
+            "ipc",
+            "l1i_miss_per_cmd",
+            "l1d_miss_per_cmd",
+            "br_miss_per_cmd",
         )
     },
     **{
@@ -57,16 +88,23 @@ FIELD_TYPES = {
             "generator_timeouts",
             "generator_conns_failed",
             "generator_samples",
+            "connected_clients",
+            "server_asserts",
+            "run_index",
             "rate",
         )
     },
+    "valid": "BOOLEAN",
     **{
         k: _TEXT
         for k in (
+            "invalid_reasons",
             "generator",
             "generator_version",
             "generator_argv",
             "generator_latency_scope",
+            "main_busy_source",
+            "perf_status",
         )
     },
 }

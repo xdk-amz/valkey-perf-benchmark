@@ -14,6 +14,7 @@ from .base import (
     run_for_duration,
 )
 from .cachecannon import CachecannonGenerator
+from .valkey_benchmark_gen import ValkeyBenchmarkGenerator
 
 DEFAULT_GENERATOR = "valkey-benchmark"
 GENERATORS = {
@@ -32,5 +33,6 @@ __all__ = [
     "GeneratorResult",
     "LoadGenerator",
     "RunHandle",
+    "ValkeyBenchmarkGenerator",
     "run_for_duration",
 ]
