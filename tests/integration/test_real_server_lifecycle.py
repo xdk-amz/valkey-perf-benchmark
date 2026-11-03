@@ -52,3 +52,18 @@ def test_cleanup_leaves_other_checkouts_running(tmp_path, mine, other_server):
         assert other_proc.poll() is None
     finally:
         stop_server(proc)
+
+
+def test_server_starts_on_configured_port_and_stops(tmp_path, mine, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    port = free_port()
+    launcher = ServerLauncher(results_dir="logs", valkey_path=str(mine))
+    (tmp_path / "logs").mkdir()
+    launcher.launch(cluster_mode=False, tls_mode=False, config={"port": port})
+    try:
+        assert ping(port)
+        assert launcher._get_valkey_pids()
+    finally:
+        launcher.shutdown(tls_mode=False)
+    assert not ping(port)
+    assert not launcher._get_valkey_pids()

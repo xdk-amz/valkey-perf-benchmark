@@ -133,6 +133,7 @@ class ServerLauncher:
         self.target_ip = target_ip
         self.module_path = None  # Will be set during launch
         self.cluster_nodes = []  # Track multiple node processes
+        self.port = DEFAULT_PORT
 
     def server_binary(self) -> str:
         """Absolute path of this checkout's server, so process matching never
@@ -381,7 +382,7 @@ class ServerLauncher:
         """Context manager for Valkey client connections."""
         client = None
         try:
-            client = self._create_client(tls_mode)
+            client = self._create_client(tls_mode, port=self.port)
             yield client
         finally:
             if client:
@@ -401,7 +402,7 @@ class ServerLauncher:
         log_file = f"{Path.cwd()}/{self.results_dir}/valkey_log_cluster_{'enabled' if cluster_mode else 'disabled'}_tls_{'enabled' if tls_mode else 'disabled'}.log"
 
         cmd = self._build_server_command(
-            port=6379,
+            port=self.port,
             bind_ip=None,
             cpu_range=self.cores,
             tls_mode=tls_mode,
@@ -624,6 +625,7 @@ class ServerLauncher:
         """Launch Valkey server and setup cluster if needed."""
         self.config = config
         self.module_path = module_path
+        self.port = (config or {}).get("port", DEFAULT_PORT)
         # Reset node tracking so a restart doesn't accumulate stale entries
         self.cluster_nodes = []
 
@@ -801,7 +803,7 @@ class ServerLauncher:
             if not self._valkey_processes_running():
                 logging.info("Valkey server terminated after SIGKILL.")
                 # After SIGKILL, port may be in TIME_WAIT - wait for it
-                self._wait_for_port_available()
+                self._wait_for_port_available(port=self.port)
                 return
             time.sleep(0.5)
 
