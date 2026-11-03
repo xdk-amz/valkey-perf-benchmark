@@ -80,6 +80,8 @@ def test_measured_acl_runs_with_both_generators(tmp_path):
         "measurement": {
             "window": 2,
             "settle": 1,
+            "max_main_runq_wait_pct": None,
+            "max_steal_pct": None,
             "acl": {"user": "bench", "password": "bench-pw"},
         },
         "generators": {"cachecannon": {"path": CACHECANNON, "threads": 2}},
