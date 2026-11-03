@@ -30,6 +30,11 @@ except ImportError:
     np = None
     FuncFormatter = None
 
+try:
+    from utils.measured_fields import MEASURED_FIELDS
+except ImportError:  # run as a script from utils/
+    from measured_fields import MEASURED_FIELDS
+
 # Shared by all CI/PI calculations and labels.
 CONFIDENCE_LEVEL = 0.95
 CONFIDENCE_PERCENT = int(CONFIDENCE_LEVEL * 100)
@@ -215,6 +220,7 @@ _CONFIG_EXCLUDED_FIELDS = frozenset(
         "p99_latency_ms_pi_upper",
         "p99_latency_ms_pi_percent",
     }
+    | MEASURED_FIELDS
 )
 
 # Failure state and display-only fields do not identify a scenario. In particular,
