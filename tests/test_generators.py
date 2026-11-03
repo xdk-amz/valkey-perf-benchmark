@@ -83,11 +83,17 @@ class TestCachecannonToml:
         assert 'duration = "20s"' in toml
         assert "cluster = true" in toml
 
-    def test_tls_is_refused(self, tmp_path):
-        with pytest.raises(GeneratorError, match="TLS"):
-            CachecannonGenerator("/bin/cc").build_argv(
-                _req(tmp_path, {"test": "GET"}, tls=True)
-            )
+    def test_tls_uses_the_server_test_certificates(self, tmp_path):
+        toml = CachecannonGenerator("/bin/cc").toml(
+            _req(tmp_path, {"test": "GET"}, tls=True, tls_dir=tmp_path / "tls")
+        )
+        assert "tls = true" in toml
+        for key, name in [
+            ("tls_ca_file", "ca.crt"),
+            ("tls_cert_file", "valkey.crt"),
+            ("tls_key_file", "valkey.key"),
+        ]:
+            assert f'{key} = "{tmp_path / "tls" / name}"' in toml
 
     def test_set_only_skips_prefill(self, tmp_path):
         gen = CachecannonGenerator("/bin/cc")
