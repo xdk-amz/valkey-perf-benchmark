@@ -32,6 +32,7 @@ def _row(**kw):
         "invalid_reasons": "",
         "generator_argv": "/bin/cc x.toml",
         "thread_pinning": "main=2",
+        "manifest_id": "0123456789abcdef",
         **kw,
     }
 
