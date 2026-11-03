@@ -52,6 +52,22 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+def free_cluster_port() -> int:
+    """A free port whose cluster bus port (port + 10000) is free as well."""
+    import random
+
+    for _ in range(200):
+        port = random.randint(20000, 50000)
+        try:
+            with socket.socket() as a, socket.socket() as b:
+                a.bind(("127.0.0.1", port))
+                b.bind(("127.0.0.1", port + 10000))
+            return port
+        except OSError:
+            continue
+    raise RuntimeError("no free cluster port pair")
+
+
 def make_checkout(dest: Path, source: Optional[str] = None) -> Path:
     """Copy built binaries into a small git checkout at ``dest``.
 

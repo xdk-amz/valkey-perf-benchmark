@@ -521,6 +521,16 @@ invalid. `steal_pct` is hypervisor steal time on the main thread's CPUs when
 it is pinned, otherwise host-wide; above `max_steal_pct` (2) the run is
 invalid. Set either limit to `null` to turn it off.
 
+Measured runs cover every scenario type. On a multi-node cluster the probe
+reads every node: `server_ops_s`, clients and keys are summed, `server_nodes`
+counts the nodes, `main_busy_pct` is the least busy node's (every node must
+be saturated, `main_busy_pct_max` is the busiest) and the disturbance fields
+are the worst node's. `cluster_execution: "parallel"` (one generator per
+node, as search scenarios run) and `mixed` scenarios start all their
+generator processes inside one window; a mixed scenario still writes one row
+per writer and reader with that side's own rate and latency, and the
+server-side fields are shared.
+
 `"perf_counters": true` adds per-command cycles, instructions, IPC and L1 and
 branch misses from `perf stat` on the server over the window.
 
