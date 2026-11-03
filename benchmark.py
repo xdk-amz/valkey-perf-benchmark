@@ -29,6 +29,7 @@ from valkey_benchmark import (
 )
 from benchmark_build import BenchmarkBuilder
 from generators import DEFAULT_GENERATOR, GENERATORS, GENERATOR_NAMES
+from measurement import validate_measurement
 from samplers import SOURCES
 from utils.cpu_utils import (
     parse_core_range,
@@ -75,6 +76,7 @@ OPTIONAL_CONF_KEYS = [
     "build_args",
     "generator",
     "generators",
+    "measurement",
 ]
 
 BUILD_ARG_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
@@ -594,6 +596,9 @@ def validate_config(cfg: dict) -> None:
                 "to option objects"
             )
 
+    if "measurement" in cfg:
+        validate_measurement(cfg["measurement"])
+
     if "cluster_mode" in cfg and not isinstance(cfg["cluster_mode"], list):
         cfg["cluster_mode"] = parse_bool(cfg["cluster_mode"])
     if "tls_mode" in cfg:
@@ -882,13 +887,26 @@ def _validate_generator_scenario(cfg: dict, scenario: dict, location: str) -> No
             raise ValueError(
                 f"{location} uses generator {name!r}, which does not support '{key}'"
             )
+    measurement = cfg.get("measurement")
+    if (
+        name == "cachecannon"
+        and isinstance(measurement, dict)
+        and measurement.get("window", 2) < 2
+    ):
+        raise ValueError(
+            f"{location} uses cachecannon, which reports once a second; "
+            "'measurement.window' must be at least 2"
+        )
     if not _generator_scenario_timed(cfg, scenario):
         raise ValueError(f"{location} uses generator {name!r} and needs a 'duration'")
 
 
 def _generator_scenario_timed(cfg: dict, scenario: dict) -> bool:
-    """Whether a non-default generator scenario knows how long to run."""
-    return bool(scenario.get("duration"))
+    """Whether a non-default generator scenario knows how long to run.
+
+    Measured runs set the duration from the measurement window.
+    """
+    return bool(scenario.get("duration") or cfg.get("measurement"))
 
 
 def has_selected_scenarios(cfg: dict) -> bool:
