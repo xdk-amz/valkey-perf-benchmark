@@ -19,11 +19,12 @@ class ServerBuilder:
         tls_mode: bool,
         valkey_path: str,
         build_args: Optional[List[str]] = None,
+        repo_url: Optional[str] = None,
     ) -> None:
         self.commit_id = commit_id
         self.tls_mode = tls_mode
         self.build_args = list(build_args or [])
-        self.repo_url = "https://github.com/valkey-io/valkey.git"
+        self.repo_url = repo_url or "https://github.com/valkey-io/valkey.git"
         self.valkey_dir = Path(valkey_path)
 
     def _run(self, command: Iterable[str], cwd: Optional[Path] = None) -> None:
@@ -71,6 +72,9 @@ class ServerBuilder:
             self._run(["./utils/gen-test-certs.sh"], cwd=self.valkey_dir)
         else:
             self._run(["make", *self.build_args, "-j"], cwd=self.valkey_dir)
+        server = self.valkey_dir / "src" / "valkey-server"
+        if not server.exists():
+            raise RuntimeError(f"Build of {self.commit_id} produced no {server}")
 
     def terminate_valkey(self) -> None:
         """Terminate all valkey processes."""
