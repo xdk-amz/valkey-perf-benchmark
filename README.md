@@ -148,6 +148,9 @@ python benchmark.py --valkey-path /path/to/valkey
 
 # Without --valkey-path a directory named valkey_<commit> is cloned and later removed
 
+# Clone commits from a fork or a local mirror instead of valkey-io/valkey
+python benchmark.py --commits my-branch --valkey-repo-url /path/to/valkey-mirror
+
 # Use a custom valkey-benchmark executable
 # (when omitted, the latest valkey-benchmark is cloned and built from unstable)
 python benchmark.py --valkey-benchmark-path /path/to/custom/valkey-benchmark

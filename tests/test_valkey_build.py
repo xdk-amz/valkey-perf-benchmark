@@ -18,6 +18,7 @@ def _make_commands(tls_mode, build_args):
     with (
         patch.object(builder, "clone_and_checkout"),
         patch("valkey_build.subprocess.run") as run,
+        patch("valkey_build.Path.exists", return_value=True),
     ):
         builder.build()
     return [c.args[0] for c in run.call_args_list if c.args[0][0] == "make"]
@@ -56,3 +57,25 @@ def test_terminate_valkey_matches_only_this_checkout(tmp_path):
     assert re.match(argv[2], f"{server} *:6379")
     assert not re.match(argv[2], "/other/checkout/src/valkey-server *:6379")
     assert not re.match(argv[2], f"{server}-old *:6379")
+
+
+def test_repo_url_defaults_to_valkey_io():
+    b = ServerBuilder(commit_id="x", tls_mode=False, valkey_path="/tmp/v")
+    assert b.repo_url == "https://github.com/valkey-io/valkey.git"
+
+
+def test_repo_url_override():
+    b = ServerBuilder(
+        commit_id="x", tls_mode=False, valkey_path="/tmp/v", repo_url="/srv/mirror"
+    )
+    assert b.repo_url == "/srv/mirror"
+
+
+def test_build_without_server_binary_raises(tmp_path):
+    b = ServerBuilder(commit_id="x", tls_mode=False, valkey_path=str(tmp_path))
+    with (
+        patch.object(b, "clone_and_checkout"),
+        patch("valkey_build.subprocess.run"),
+        pytest.raises(RuntimeError, match="produced no"),
+    ):
+        b.build()
