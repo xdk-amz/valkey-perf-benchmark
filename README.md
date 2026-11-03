@@ -193,6 +193,18 @@ python utils/compare_benchmark_results.py --baseline results/commit1/metrics.jso
 python utils/compare_benchmark_results.py --baseline results/commit1/metrics.json --new results/commit2/metrics.json --output comparison.md --metrics latency --graphs
 ```
 
+### A/B Summary of Measured Runs
+
+```bash
+python utils/ab_summary.py --results-dir results 9.0.7 unstable
+```
+
+For measured rows (those with `server_ops_s`), prints per scenario and commit:
+valid runs out of total, mean server-side ops/s with its 95% confidence
+interval, main-thread busy %, p50/p99, and the change against the first
+commit with a Welch t-test p-value. Invalid runs are listed with their reasons
+and never averaged. `--json` prints the same as JSON.
+
 ### Comparison Tool Features
 
 - **Automatic Run Averaging**: Groups and averages multiple benchmark runs with identical configurations
