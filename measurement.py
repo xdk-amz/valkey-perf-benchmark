@@ -73,8 +73,15 @@ def validate_measurement(value) -> None:
             raise ValueError(f"'measurement.{key}' must be a non-negative number")
     if "require_main_busy_pct" in value:
         v = value["require_main_busy_pct"]
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 100:
-            raise ValueError("'measurement.require_main_busy_pct' must be in (0, 100]")
+        levels = v.values() if isinstance(v, dict) else [v]
+        if (isinstance(v, dict) and not v) or not all(
+            not isinstance(x, bool) and isinstance(x, (int, float)) and 0 < x <= 100
+            for x in levels
+        ):
+            raise ValueError(
+                "'measurement.require_main_busy_pct' must be a number in (0, 100] "
+                "or an object mapping server version prefixes (and 'default') to one"
+            )
     if "acl" in value:
         acl = value["acl"]
         if not isinstance(acl, dict) or not acl.get("user") or not acl.get("password"):
@@ -193,6 +200,7 @@ class ServerProbe:
             "active_main_s": info.get("used_active_time_main_thread"),
             "clients": int(info.get("connected_clients", 0)),
             "pid": int(info.get("process_id", 0)),
+            "version": info.get("valkey_version") or info.get("redis_version"),
             "keys": sum(
                 v.get("keys", 0)
                 for k, v in info.items()
@@ -242,6 +250,23 @@ def _stderr_tail(path: Path) -> str:
         return ""
 
 
+def busy_threshold(setting, version: Optional[str]) -> Optional[float]:
+    """The saturation gate's threshold for a server version.
+
+    ``setting`` is a number, or an object whose keys are version prefixes
+    ("9.0", "255." for unstable) plus an optional "default"; the longest
+    prefix of ``version`` wins.
+    """
+    if not isinstance(setting, dict):
+        return setting
+    matches = [
+        k for k in setting if k != "default" and version and version.startswith(k)
+    ]
+    if matches:
+        return setting[max(matches, key=len)]
+    return setting.get("default")
+
+
 def evaluate_validity(row: dict, opts: dict, scenario: dict) -> List[str]:
     reasons = []
     if row.get("generator_ended_early"):
@@ -270,7 +295,7 @@ def evaluate_validity(row: dict, opts: dict, scenario: dict) -> List[str]:
     steal = row.get("steal_pct")
     if steal_cap is not None and steal is not None and steal > steal_cap:
         reasons.append(f"CPU steal {steal:.1f}% > {steal_cap}%")
-    need = opts.get("require_main_busy_pct")
+    need = busy_threshold(opts.get("require_main_busy_pct"), row.get("server_version"))
     if need and not scenario.get("rate"):
         busy = row.get("main_busy_pct")
         if busy is None:
@@ -443,6 +468,7 @@ def _run_window(
         "connected_clients": b["clients"] - 1,
         "expected_clients": expected_clients,
         "server_asserts": asserts,
+        "server_version": b.get("version"),
         "generator_ended_early": ended_early,
         "perf_status": perf_status,
         **result.extra,

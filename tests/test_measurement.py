@@ -222,3 +222,29 @@ class TestDisturbance:
         validate_measurement({"max_main_runq_wait_pct": None, "max_steal_pct": 1})
         with pytest.raises(ValueError):
             validate_measurement({"max_steal_pct": -1})
+
+
+class TestBusyThresholdPerVersion:
+    SETTING = {"default": 98, "255.": 90, "9.0": 97, "9.0.7": 99}
+
+    @pytest.mark.parametrize(
+        "version, want",
+        [("255.255.255", 90), ("9.0.7", 99), ("9.0.3", 97), ("8.1.1", 98), (None, 98)],
+    )
+    def test_longest_prefix_wins(self, version, want):
+        from measurement import busy_threshold
+
+        assert busy_threshold(self.SETTING, version) == want
+
+    def test_gate_uses_the_row_version(self):
+        opts = _opts(require_main_busy_pct=self.SETTING)
+        row = {"main_busy_pct": 94.0, "server_version": "255.255.255"}
+        assert evaluate_validity(row, opts, {}) == []
+        row["server_version"] = "9.0.7"
+        assert evaluate_validity(row, opts, {}) == ["main 94.0% busy < 99%"]
+
+    def test_validation(self):
+        validate_measurement({"require_main_busy_pct": {"default": 98, "255.": 90}})
+        for bad in ({}, {"default": 120}, {"9.0": True}):
+            with pytest.raises(ValueError):
+                validate_measurement({"require_main_busy_pct": bad})
