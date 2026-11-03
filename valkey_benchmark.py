@@ -29,7 +29,12 @@ from generators import (
     ValkeyBenchmarkGenerator,
     run_for_duration,
 )
-from measurement import ServerProbe, measurement_options, run_measured, stamp_validity
+from measurement import (
+    ServerProbe,
+    measurement_options,
+    run_measured_parts,
+    stamp_validity,
+)
 from thread_pinning import pinning_warnings
 from metrics_sampler import is_local_address
 
@@ -38,6 +43,61 @@ VALKEY_BENCHMARK = "src/valkey-benchmark"
 DEFAULT_PORT = 6379
 # Key of an aggregated row's generator-only fields, merged into the metrics row.
 GENERATOR_EXTRA = "_generator_extra"
+
+_LATENCY_COLUMNS = (
+    "avg_latency_ms",
+    "p50_latency_ms",
+    "p95_latency_ms",
+    "p99_latency_ms",
+)
+
+
+def _num(value) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def aggregate_part_rows(rows: List[dict]) -> dict:
+    """Combine generator rows run side by side: rates add up, latencies are
+    weighted by each part's rate, min and max are taken across parts."""
+    if len(rows) == 1:
+        return dict(rows[0])
+    rates = [_num(r.get("rps")) or 0.0 for r in rows]
+    total = sum(rates)
+    out = {"test": rows[0].get("test"), "rps": total}
+    for key in _LATENCY_COLUMNS:
+        vals = [_num(r.get(key)) for r in rows]
+        if total and all(v is not None for v in vals):
+            out[key] = sum(v * w for v, w in zip(vals, rates)) / total
+    mins = [_num(r.get("min_latency_ms")) for r in rows]
+    maxs = [_num(r.get("max_latency_ms")) for r in rows]
+    if all(v is not None for v in mins):
+        out["min_latency_ms"] = min(mins)
+    if all(v is not None for v in maxs):
+        out["max_latency_ms"] = max(maxs)
+    return out
+
+
+def merge_part_extras(extras: List[dict]) -> dict:
+    """Combine the generator-side fields of parts run side by side."""
+    if len(extras) == 1:
+        return dict(extras[0])
+    out = dict(extras[0])
+    for key in ("generator_errors", "generator_timeouts", "generator_conns_failed"):
+        vals = [e.get(key) for e in extras if e.get(key) is not None]
+        if vals:
+            out[key] = sum(vals)
+    for key in ("p90_latency_ms", "p999_latency_ms", "p9999_latency_ms"):
+        vals = [e.get(key) for e in extras if e.get(key) is not None]
+        if vals:
+            out[key] = max(vals)
+    out["generator_ended_early"] = any(e.get("generator_ended_early") for e in extras)
+    out["generator_argv"] = " ; ".join(e.get("generator_argv", "") for e in extras)
+    return out
+
+
 DEFAULT_TIMEOUT = 30
 
 # Pause between retried populate passes, giving eviction room to catch up.
@@ -889,10 +949,16 @@ class ClientRunner:
                     # One sampler wraps the whole parallel client set: it watches
                     # the server, not the clients. The rows it collects after the
                     # last client exits cover in-memory aggregation only.
+                    run_mixed = (
+                        self._run_measured_mixed
+                        if measurement_options(self.config)
+                        and metrics_processor is not None
+                        else self._run_mixed_workload
+                    )
                     with self._per_second_sampling(
                         scenario, group_id, **sampling_metadata
                     ):
-                        metrics_list = self._run_mixed_workload(
+                        metrics_list = run_mixed(
                             scenario,
                             group_id,
                             config_set,
@@ -1463,10 +1529,10 @@ class ClientRunner:
 
     # ---------- measured runs ----------------------------------------------
 
-    def _probe_client(self, user=None, password=None):
+    def _probe_client(self, user=None, password=None, port=None):
         return valkey.Valkey(
             host=self.target_ip,
-            port=self.config.get("port", DEFAULT_PORT),
+            port=port or self.config.get("port", DEFAULT_PORT),
             username=user,
             password=password,
             decode_responses=True,
@@ -1481,37 +1547,204 @@ class ClientRunner:
             return 0
         return int(scenario.get("keyspacelen", self.config.get("keyspacelen", [0])[0]))
 
-    def _run_measured_scenario(self, scenario: dict, seed_val) -> Optional[dict]:
-        """Run one scenario under the measurement window; returns its row.
+    def _measured_auth(self):
+        acl = measurement_options(self.config).get("acl")
+        return (acl["user"], acl["password"]) if acl else (None, None)
 
-        Throughput and main-thread busy time come from the server's own
-        counters at the window edges; the generator's report supplies latency.
-        """
-        opts = measurement_options(self.config)
-        generator = self._generator(self._generator_name(scenario))
-        acl = opts.get("acl")
-        user, password = (acl["user"], acl["password"]) if acl else (None, None)
-        probe = ServerProbe(
-            lambda: self._probe_client(user, password),
+    def _measured_probe(self, user, password) -> ServerProbe:
+        """A probe over every node the scenario's load reaches."""
+        ports = self._get_active_ports()
+
+        def factory(port):
+            return lambda: self._probe_client(user, password, port)
+
+        return ServerProbe(
+            [factory(port) for port in ports],
             local=is_local_address(self.target_ip),
         )
+
+    def _admin_factories(self):
+        return [
+            (lambda port=port: self._probe_client(port=port))
+            for port in self._get_active_ports()
+        ]
+
+    def _measured_request(self, scenario, seed_val, *, port=None, cpu=None, tag=""):
+        user, password = self._measured_auth()
         req = self._generator_request(scenario, seed_val, duration_s=0)
         req.auth_user, req.auth_password = user, password
-        out = run_measured(
-            generator,
-            req,
-            probe,
-            opts,
-            expect_keys=self._expected_keys(generator, scenario),
-            admin_client_factory=self._probe_client,
-        )
-        if out is None:
+        if port is not None:
+            req.port = port
+            req.cluster = False
+        if cpu is not None:
+            req.cpu_range = cpu
+        if tag:
+            req.workdir = req.workdir.with_name(f"{req.workdir.name}_{tag}")
+        return req
+
+    def _measured_parts_for(self, scenario: dict, seed_val) -> List[tuple]:
+        """(generator, request) pairs for one non-mixed scenario: one
+        generator, or one per node for cluster_execution "parallel"."""
+        name = self._generator_name(scenario)
+        if not self._should_use_parallel(scenario):
+            return [(self._generator(name), self._measured_request(scenario, seed_val))]
+        ports = self._get_active_ports()
+        cpus = self.client_cpu_ranges or [None]
+        n = int(scenario.get("parallel_clients") or len(ports))
+        return [
+            (
+                self._generator(name),
+                self._measured_request(
+                    scenario,
+                    seed_val,
+                    port=ports[k % len(ports)],
+                    cpu=cpus[k % len(cpus)],
+                    tag=f"p{k}",
+                ),
+            )
+            for k in range(n)
+        ]
+
+    def _expected_keys_for(self, parts) -> int:
+        return max(self._expected_keys(g, req.scenario) for g, req in parts)
+
+    def _finish_measured(self, out: dict, indexes: List[int], scenario: dict):
+        """Combine the parts at ``indexes`` into one row with its extra fields."""
+        opts = measurement_options(self.config)
+        picked = [out["parts"][k] for k in indexes]
+        if any(p is None for p in picked):
             return None
-        extra = self._measured_metadata(out["extra"])
+        row = aggregate_part_rows([p["row"] for p in picked])
+        extra = {**out["extra"], **merge_part_extras([p["extra"] for p in picked])}
+        if len(picked) > 1:
+            extra["generator_processes"] = len(picked)
+        extra = self._measured_metadata(extra)
         extra["duration"] = opts["window"]
         extra["benchmark_mode"] = "measured"
         stamp_validity(extra, opts, scenario)
-        return {**out["row"], GENERATOR_EXTRA: extra}
+        return {**row, GENERATOR_EXTRA: extra}
+
+    def _run_measured_scenario(self, scenario: dict, seed_val) -> Optional[dict]:
+        """Run one scenario under the measurement window; returns its row.
+
+        Throughput and main-thread busy time come from the servers' own
+        counters at the window edges, summed over a cluster's nodes; the
+        generators' reports supply latency.
+        """
+        opts = measurement_options(self.config)
+        parts = self._measured_parts_for(scenario, seed_val)
+        out = run_measured_parts(
+            parts,
+            self._measured_probe(*self._measured_auth()),
+            opts,
+            expect_keys=self._expected_keys_for(parts),
+            admin_client_factory=self._admin_factories(),
+        )
+        return self._finish_measured(out, list(range(len(parts))), scenario)
+
+    def _run_measured_mixed(
+        self,
+        scenario: dict,
+        group_id,
+        config_set,
+        metrics_processor,
+        warmup_duration,
+        group_description=None,
+    ) -> Optional[List[dict]]:
+        """Run a mixed scenario's writers and readers under one window.
+
+        Every sub-scenario gets its own row with its own generator's rate and
+        latency; the server-side fields are shared by all of them.
+        """
+        writes, reads = self._normalize_mixed_configs(scenario)
+        sid = scenario.get("id", "unknown")
+        if scenario.get("cluster_execution") == "single" or not self._is_cme():
+            ports = [None]
+        else:
+            ports = self._get_active_ports()
+        cpus = self.client_cpu_ranges or [None]
+        parts, owners = [], []
+        for phase, subs in (("write", writes), ("read", reads)):
+            for sub in subs:
+                sub_id = sub.get("id", phase[0])
+                child = {
+                    **copy.deepcopy(sub),
+                    "id": f"{sid}_{phase}_{sub_id}",
+                    "generator": sub.get("generator", self._generator_name(scenario)),
+                }
+                for port in ports:
+                    k = len(parts)
+                    parts.append(
+                        (
+                            self._generator(child["generator"]),
+                            self._measured_request(
+                                child,
+                                None,
+                                port=port,
+                                cpu=cpus[k % len(cpus)],
+                                tag=f"{phase}{k}",
+                            ),
+                        )
+                    )
+                    owners.append((phase, sub_id, sub))
+        opts = measurement_options(self.config)
+        out = run_measured_parts(
+            parts,
+            self._measured_probe(*self._measured_auth()),
+            opts,
+            expect_keys=self._expected_keys_for(parts),
+            admin_client_factory=self._admin_factories(),
+        )
+        rows = []
+        seen = []
+        for phase, sub_id, sub in owners:
+            if (phase, sub_id) in seen:
+                continue
+            seen.append((phase, sub_id))
+            indexes = [
+                k
+                for k, (p, s_id, _) in enumerate(owners)
+                if (p, s_id) == (phase, sub_id)
+            ]
+            row = self._finish_measured(out, indexes, sub)
+            workload_key = "command" if "command" in sub else "test"
+            extra = row.pop(GENERATOR_EXTRA) if row else None
+            metric = (
+                self._create_mixed_metric(
+                    row,
+                    {**sub, workload_key: sub.get(workload_key) or row.get("test")},
+                    scenario,
+                    group_id,
+                    sid,
+                    sub_id,
+                    phase,
+                    config_set,
+                    warmup_duration,
+                    metrics_processor,
+                    group_description,
+                )
+                if row
+                else None
+            )
+            if metric is None:
+                metric = self._create_failure_marker(
+                    metrics_processor,
+                    sub,
+                    group_id=group_id,
+                    scenario_id=sid,
+                    test_id=f"{group_id}_{sid}_{phase}_{sub_id}",
+                    test_phase=f"mixed_{phase}",
+                    error="Mixed sub-scenario produced no parsable output",
+                    config_set=config_set,
+                    warmup=warmup_duration,
+                    parent_scenario=scenario,
+                    group_description=group_description,
+                )
+            else:
+                metric.update(extra)
+                self._stamp_provenance(metric)
+            rows.append(metric)
+        return rows
 
     def _measured_metadata(self, extra: dict) -> dict:
         """Run metadata stamped on every measured row."""

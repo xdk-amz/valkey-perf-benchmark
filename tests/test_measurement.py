@@ -248,3 +248,45 @@ class TestBusyThresholdPerVersion:
         for bad in ({}, {"default": 120}, {"9.0": True}):
             with pytest.raises(ValueError):
                 validate_measurement({"require_main_busy_pct": bad})
+
+
+def test_parts_combine_rates_and_weight_latency():
+    from valkey_benchmark import aggregate_part_rows, merge_part_extras
+
+    row = aggregate_part_rows(
+        [
+            {
+                "test": "GET",
+                "rps": "300",
+                "p50_latency_ms": "1.0",
+                "max_latency_ms": "5",
+            },
+            {
+                "test": "GET",
+                "rps": "100",
+                "p50_latency_ms": "3.0",
+                "max_latency_ms": "9",
+            },
+        ]
+    )
+    assert row["rps"] == 400 and row["p50_latency_ms"] == 1.5
+    assert row["max_latency_ms"] == 9 and "p95_latency_ms" not in row
+    extra = merge_part_extras(
+        [
+            {"generator_errors": 1, "p999_latency_ms": 2.0, "generator_argv": "a"},
+            {
+                "generator_errors": 2,
+                "p999_latency_ms": 4.0,
+                "generator_argv": "b",
+                "generator_ended_early": True,
+            },
+        ]
+    )
+    assert extra["generator_errors"] == 3 and extra["p999_latency_ms"] == 4.0
+    assert extra["generator_ended_early"] is True and extra["generator_argv"] == "a ; b"
+
+
+def test_probe_sums_nodes():
+    a, b = _FakeInfoClient(clients=2), _FakeInfoClient(clients=3)
+    snap = ServerProbe([lambda: a, lambda: b], local=False).snapshot()
+    assert snap["clients"] == 5 and len(snap["active_main_s"]) == 2

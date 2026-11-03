@@ -20,6 +20,8 @@ MEASURED_FIELDS = frozenset(
         "window_s",
         "main_busy_pct",
         "main_busy_source",
+        "main_busy_pct_max",
+        "generator_processes",
         "main_cpu_pct",
         "main_runq_wait_pct",
         "main_nvcsw_per_s",
