@@ -39,6 +39,9 @@ DEFAULTS = {
     "ready_timeout": 60,
     "rate_tolerance_pct": 5.0,
     "perf_counters": False,
+    # Disturbance limits; None turns a check off.
+    "max_main_runq_wait_pct": 5.0,
+    "max_steal_pct": 2.0,
 }
 
 
@@ -62,6 +65,12 @@ def validate_measurement(value) -> None:
     for key in ("window", "settle", "ready_timeout"):
         if key in value and (not isinstance(value[key], int) or value[key] <= 0):
             raise ValueError(f"'measurement.{key}' must be a positive integer")
+    for key in ("max_main_runq_wait_pct", "max_steal_pct"):
+        v = value.get(key)
+        if v is not None and (
+            isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0
+        ):
+            raise ValueError(f"'measurement.{key}' must be a non-negative number")
     if "require_main_busy_pct" in value:
         v = value["require_main_busy_pct"]
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 100:
@@ -89,6 +98,34 @@ def thread_ticks(pid: int, tid: Optional[int] = None) -> float:
     path = f"/proc/{pid}/task/{tid or pid}/stat" if tid else f"/proc/{pid}/stat"
     fields = Path(path).read_text().rsplit(")", 1)[1].split()
     return float(fields[11]) + float(fields[12])
+
+
+def thread_sched(pid: int, tid: int) -> Dict[str, float]:
+    """Run-queue wait (ns) and involuntary context switches of one thread."""
+    base = f"/proc/{pid}/task/{tid}"
+    wait_ns = float(Path(f"{base}/schedstat").read_text().split()[1])
+    nvcsw = 0.0
+    for line in Path(f"{base}/status").read_text().splitlines():
+        if line.startswith("nonvoluntary_ctxt_switches:"):
+            nvcsw = float(line.split()[1])
+    return {"wait_ns": wait_ns, "nvcsw": nvcsw}
+
+
+def cpu_steal(cpus: Optional[set] = None) -> Optional[tuple]:
+    """(steal, total) jiffies summed over ``cpus`` (all CPUs when None)."""
+    steal = total = 0.0
+    found = False
+    for line in Path("/proc/stat").read_text().splitlines():
+        name, *fields = line.split()
+        if not name.startswith("cpu") or name == "cpu":
+            continue
+        if cpus is not None and int(name[3:]) not in cpus:
+            continue
+        vals = [float(v) for v in fields[:8]]
+        steal += vals[7]
+        total += sum(vals)
+        found = True
+    return (steal, total) if found else None
 
 
 def io_thread_index(name: str) -> Optional[int]:
@@ -222,6 +259,17 @@ def evaluate_validity(row: dict, opts: dict, scenario: dict) -> List[str]:
         rate, got = float(scenario["rate"]), float(row.get("server_ops_s") or 0)
         if abs(got - rate) / rate * 100.0 > opts["rate_tolerance_pct"]:
             reasons.append(f"served {got:.0f}/s against a {rate:.0f}/s target")
+    wait_cap = opts.get("max_main_runq_wait_pct")
+    wait = row.get("main_runq_wait_pct")
+    if wait_cap is not None and wait is not None and wait > wait_cap:
+        reasons.append(
+            f"main thread waited for a CPU {wait:.1f}% of the window "
+            f"(> {wait_cap}%): disturbed"
+        )
+    steal_cap = opts.get("max_steal_pct")
+    steal = row.get("steal_pct")
+    if steal_cap is not None and steal is not None and steal > steal_cap:
+        reasons.append(f"CPU steal {steal:.1f}% > {steal_cap}%")
     need = opts.get("require_main_busy_pct")
     if need and not scenario.get("rate"):
         busy = row.get("main_busy_pct")
@@ -323,7 +371,20 @@ def _run_window(
                 t["gen"] = thread_ticks(gen_pid)
             except OSError:
                 t["gen"] = None
+            try:
+                t["sched"] = thread_sched(pid, pid)
+            except (OSError, IndexError, ValueError):
+                t["sched"] = None
+            t["steal"] = cpu_steal(main_cpus)
             return t
+
+        main_cpus = None
+        if local:
+            try:
+                affinity = os.sched_getaffinity(pid)
+                main_cpus = affinity if len(affinity) < (os.cpu_count() or 0) else None
+            except OSError:
+                pass
 
         a, ta = probe.snapshot(), ticks()
         perf_text, perf_status = "", "off"
@@ -397,6 +458,20 @@ def _run_window(
         if "main_busy_pct" not in extra:
             extra["main_busy_pct"] = extra["main_cpu_pct"]
             extra["main_busy_source"] = "main thread cpu"
+        if ta["sched"] and tb["sched"]:
+            extra["main_runq_wait_pct"] = (
+                (tb["sched"]["wait_ns"] - ta["sched"]["wait_ns"]) / 1e9 / span * 100
+            )
+            extra["main_nvcsw_per_s"] = (
+                tb["sched"]["nvcsw"] - ta["sched"]["nvcsw"]
+            ) / span
+        if ta["steal"] and tb["steal"] and tb["steal"][1] > ta["steal"][1]:
+            extra["steal_pct"] = (
+                (tb["steal"][0] - ta["steal"][0])
+                / (tb["steal"][1] - ta["steal"][1])
+                * 100
+            )
+            extra["steal_scope"] = "main cpus" if main_cpus else "host"
     if perf_text:
         extra.update(parse_perf_stat(perf_text, cmds))
     return {"row": result.row, "extra": extra, "stdout": result.stdout}

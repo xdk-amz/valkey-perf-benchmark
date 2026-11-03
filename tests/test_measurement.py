@@ -200,3 +200,25 @@ def test_cachecannon_needs_a_two_second_window():
         validate_test_groups(cfg)
     cfg["measurement"]["window"] = 2
     validate_test_groups(cfg)
+
+
+class TestDisturbance:
+    def test_runq_wait_over_limit_is_invalid(self):
+        row = {"main_runq_wait_pct": 12.0}
+        reasons = evaluate_validity(row, _opts(), {})
+        assert reasons and "disturbed" in reasons[0]
+
+    def test_limits_can_be_turned_off(self):
+        row = {"main_runq_wait_pct": 50.0, "steal_pct": 9.0}
+        opts = _opts(max_main_runq_wait_pct=None, max_steal_pct=None)
+        assert evaluate_validity(row, opts, {}) == []
+
+    def test_steal(self):
+        assert evaluate_validity({"steal_pct": 3.0}, _opts(), {}) == [
+            "CPU steal 3.0% > 2.0%"
+        ]
+
+    def test_validation(self):
+        validate_measurement({"max_main_runq_wait_pct": None, "max_steal_pct": 1})
+        with pytest.raises(ValueError):
+            validate_measurement({"max_steal_pct": -1})
