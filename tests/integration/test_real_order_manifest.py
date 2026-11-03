@@ -1,11 +1,14 @@
 """Interleaved run order and run manifests against real servers."""
 
 import json
+import subprocess
+import sys
 
 import pytest
 
 from tests.integration.real_valkey import (
     CACHECANNON,
+    PROJECT_ROOT,
     free_port,
     read_rows,
     requires_cachecannon,
@@ -103,3 +106,27 @@ def test_rows_point_at_their_manifest(run):
 def test_checkouts_are_removed_at_the_end(run):
     tmp_path, _, _ = run
     assert not any(tmp_path.glob("valkey_*"))
+
+
+def test_ab_summary_reads_the_run(run):
+    tmp_path, _, _ = run
+    result = subprocess.run(
+        [
+            sys.executable,
+            "utils/ab_summary.py",
+            "--results-dir",
+            str(tmp_path / "results"),
+            "--json",
+            *REFS,
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    entries = json.loads(result.stdout)
+    assert len(entries) == 4
+    for e in entries:
+        assert e["n"] == 4 and e["n_valid"] == 4
+        assert e["server_ops_s"] > 0
+    assert all("welch_p" in e for e in entries if e["commit"] == "cand")
