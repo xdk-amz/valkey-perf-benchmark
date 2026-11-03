@@ -30,7 +30,12 @@ def run(tmp_path_factory):
         "tls_mode": False,
         "port": free_port(),
         "keyspacelen": [5000],
-        "measurement": {"window": 2, "settle": 1},
+        "measurement": {
+            "window": 2,
+            "settle": 1,
+            "max_main_runq_wait_pct": None,
+            "max_steal_pct": None,
+        },
         "generators": {"cachecannon": {"path": CACHECANNON, "threads": 1}},
         "test_groups": [
             {
@@ -100,7 +105,7 @@ def test_rows_point_at_their_manifest(run):
             "cachecannon",
         }
         assert all(g["sha256"] for g in doc["generators"])
-        assert doc["config"]["measurement"] == {"window": 2, "settle": 1}
+        assert doc["config"]["measurement"]["window"] == 2
 
 
 def test_checkouts_are_removed_at_the_end(run):

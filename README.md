@@ -499,6 +499,15 @@ closed-loop run whose main thread was less busy than that is invalid, since
 it measured the client rather than the server. `compare_benchmark_results.py`
 drops invalid rows and reports how many it dropped.
 
+Two checks catch a run disturbed by other work on the host, and are on by
+default for measured runs. `main_runq_wait_pct` is the share of the window the
+main thread spent runnable but waiting for a CPU (from
+`/proc/<pid>/task/<tid>/schedstat`), with `main_nvcsw_per_s` (involuntary
+context switches) beside it; above `max_main_runq_wait_pct` (5) the run is
+invalid. `steal_pct` is hypervisor steal time on the main thread's CPUs when
+it is pinned, otherwise host-wide; above `max_steal_pct` (2) the run is
+invalid. Set either limit to `null` to turn it off.
+
 `"perf_counters": true` adds per-command cycles, instructions, IPC and L1 and
 branch misses from `perf stat` on the server over the window.
 
