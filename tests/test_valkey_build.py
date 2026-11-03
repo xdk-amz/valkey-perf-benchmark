@@ -1,5 +1,6 @@
 """Unit tests for valkey_build.py ServerBuilder.build()."""
 
+import re
 from unittest.mock import patch
 
 import pytest
@@ -40,3 +41,18 @@ def test_build_args_passed_to_make(tls_mode, expected):
 )
 def test_no_build_args(tls_mode, expected):
     assert _make_commands(tls_mode, None) == [["make", "distclean"], expected]
+
+
+def test_terminate_valkey_matches_only_this_checkout(tmp_path):
+    builder = ServerBuilder(
+        commit_id="abc", tls_mode=False, valkey_path=str(tmp_path / "valkey_abc")
+    )
+    with patch("valkey_build.subprocess.run") as run:
+        builder.terminate_valkey()
+    argv = run.call_args.args[0]
+    server = str((tmp_path / "valkey_abc" / "src" / "valkey-server").resolve())
+    assert argv[:2] == ["pkill", "-f"]
+    assert argv[2].startswith("^") and argv[2].endswith("( |$)")
+    assert re.match(argv[2], f"{server} *:6379")
+    assert not re.match(argv[2], "/other/checkout/src/valkey-server *:6379")
+    assert not re.match(argv[2], f"{server}-old *:6379")

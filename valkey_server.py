@@ -134,6 +134,14 @@ class ServerLauncher:
         self.module_path = None  # Will be set during launch
         self.cluster_nodes = []  # Track multiple node processes
 
+    def server_binary(self) -> str:
+        """Absolute path of this checkout's server, so process matching never
+        reaches servers started from other checkouts on the same host."""
+        return str((Path(self.valkey_path) / VALKEY_SERVER).resolve())
+
+    def _server_pattern(self) -> str:
+        return f"^{re.escape(self.server_binary())}( |$)"
+
     def _create_client(
         self, tls_mode: bool, host: str = "127.0.0.1", port: int = DEFAULT_PORT
     ) -> valkey.Valkey:
@@ -236,7 +244,7 @@ class ServerLauncher:
         if cpu_range:
             cmd += ["taskset", "-c", cpu_range]
 
-        cmd.append(VALKEY_SERVER)
+        cmd.append(self.server_binary())
 
         # Optional positional config file (must come right after the binary,
         # before any --flag args). Subsequent --flag values override file values.
@@ -732,7 +740,7 @@ class ServerLauncher:
         """Get PIDs of running valkey-server processes."""
         try:
             result = subprocess.run(
-                ["pgrep", "-f", VALKEY_SERVER],
+                ["pgrep", "-f", self._server_pattern()],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -761,7 +769,9 @@ class ServerLauncher:
             f"Sending SIGTERM to PIDs: {remaining_pids}"
         )
         try:
-            subprocess.run(["pkill", "-f", VALKEY_SERVER], timeout=5, check=False)
+            subprocess.run(
+                ["pkill", "-f", self._server_pattern()], timeout=5, check=False
+            )
         except Exception as e:
             logging.warning(f"SIGTERM via pkill failed: {e}")
 
@@ -779,7 +789,9 @@ class ServerLauncher:
             f"SIGTERM ineffective. Sending SIGKILL to PIDs: {remaining_pids}"
         )
         try:
-            subprocess.run(["pkill", "-9", "-f", VALKEY_SERVER], timeout=5, check=False)
+            subprocess.run(
+                ["pkill", "-9", "-f", self._server_pattern()], timeout=5, check=False
+            )
         except Exception as e:
             logging.warning(f"SIGKILL via pkill failed: {e}")
 

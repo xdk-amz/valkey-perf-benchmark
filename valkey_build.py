@@ -1,6 +1,7 @@
 """Build Valkey from source for benchmarking."""
 
 import logging
+import re
 import shutil
 import subprocess
 import time
@@ -74,9 +75,12 @@ class ServerBuilder:
 
     def terminate_valkey(self) -> None:
         """Terminate all valkey processes."""
-        logging.info("Terminating any running Valkey server processes...")
+        server = (self.valkey_dir / "src" / "valkey-server").resolve()
+        logging.info(f"Terminating Valkey servers started from {server}...")
         try:
-            subprocess.run(["pkill", "-f", "valkey-server"], check=True)
+            subprocess.run(
+                ["pkill", "-f", f"^{re.escape(str(server))}( |$)"], check=True
+            )
             logging.info("Valkey processes terminated.")
         except subprocess.CalledProcessError as e:
             if e.returncode == 1:

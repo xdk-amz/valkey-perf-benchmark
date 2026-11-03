@@ -17,6 +17,7 @@ def launcher():
     """Create a minimal ServerLauncher without triggering side effects."""
     obj = ServerLauncher.__new__(ServerLauncher)
     obj.cores = None
+    obj.valkey_path = "/tmp/valkey"
     obj.target_ip = "127.0.0.1"
     obj.config = {}
     return obj
