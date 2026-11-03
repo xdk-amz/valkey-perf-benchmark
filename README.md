@@ -552,8 +552,12 @@ cachecannon needs a build that supports `target.auth_user` and
 commit once with the commit order rotated by k. With n commits and a multiple
 of n runs, every commit sits in every slot equally often, so drift over the
 session (thermal, other load) cannot favour one commit. Rows carry
-`run_index` and `order_slot`. It needs one checkout per commit, so it cannot
-be combined with `--valkey-path` or `--module`.
+`run_index` and `order_slot`. `--order interleaved-cell` does the same one
+scenario at a time: each scenario runs on every commit, `--runs` times with
+the order rotated, before the next scenario starts, so the runs being
+compared are minutes apart rather than a whole matrix apart. Both need one
+checkout per commit, so they cannot be combined with `--valkey-path` or
+`--module`.
 
 Every run writes `results/<commit>/manifests/<id>.json` with the server
 binary's sha256, `.text` size and compiler, the Valkey commit and whether its

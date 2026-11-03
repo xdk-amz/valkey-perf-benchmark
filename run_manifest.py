@@ -101,7 +101,9 @@ def build_manifest(
 ) -> dict:
     server = (valkey_dir / "src" / "valkey-server").resolve()
     effective = {
-        k: v for k, v in cfg.items() if k not in ("groups_to_run", "scenario_filter")
+        k: v
+        for k, v in cfg.items()
+        if k not in ("groups_to_run", "scenario_filter", "cell_filter")
     }
     return {
         "commit_ref": commit,
