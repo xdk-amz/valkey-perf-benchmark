@@ -62,3 +62,45 @@ def test_rows_carry_provenance(minimal_client_runner):
     r.manifest_id, r.order_slot, r.current_run = "m1", 1, 3
     r._stamp_provenance(row)
     assert row == {"manifest_id": "m1", "order_slot": 1, "run_index": 3}
+
+
+def test_interleaved_cells_rotate_within_each_cell():
+    calls = []
+    cfg = {
+        "tls_mode": False,
+        "test_groups": [
+            {"group": 1, "scenarios": [{"id": "a"}, {"id": "b"}]},
+            {"group": 2, "scenarios": [{"id": "c"}]},
+        ],
+        "groups_to_run": {1},
+    }
+    args = argparse.Namespace(runs=2, use_running_server=True, valkey_path=None)
+    with patch.object(
+        benchmark,
+        "run_benchmark_matrix",
+        side_effect=lambda **kw: calls.append(
+            (sorted(kw["cfg"]["cell_filter"]), kw["commit_id"], kw["run_state"])
+        ),
+    ):
+        benchmark.run_interleaved_cells(cfg, ["A", "B"], args)
+    assert [(c[0][0][1], c[1]) for c in calls] == [
+        ("a", "A"),
+        ("a", "B"),
+        ("a", "B"),
+        ("a", "A"),
+        ("b", "A"),
+        ("b", "B"),
+        ("b", "B"),
+        ("b", "A"),
+    ]
+    assert calls[2][2] == {"runs": 1, "run_offset": 1, "order_slot": 0}
+
+
+def test_cell_filter_selects_one_scenario(minimal_client_runner):
+    r = minimal_client_runner
+    r.config = {
+        "test_groups": [{"group": 1, "scenarios": [{"id": "a"}, {"id": "b"}]}],
+        "cell_filter": {(1, "b")},
+    }
+    ids = [s["scenario"]["id"] for s in r._iterate_test_groups_scenarios()]
+    assert ids == ["b"]

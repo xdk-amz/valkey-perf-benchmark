@@ -296,12 +296,14 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--order",
-        choices=["grouped", "interleaved"],
+        choices=["grouped", "interleaved", "interleaved-cell"],
         default="grouped",
         help="Run order across commits. 'grouped' runs every run of one commit, "
         "then the next. 'interleaved' builds every commit first, then for run k "
         "runs each commit once with the commit order rotated by k, so each "
-        "commit sits in each slot equally often.",
+        "commit sits in each slot equally often. 'interleaved-cell' does the "
+        "same for one scenario (cell) at a time, so the commits being compared "
+        "run minutes rather than a whole matrix apart.",
     )
     parser.add_argument(
         "--cachecannon-path",
@@ -1248,6 +1250,56 @@ def _write_run_manifest(results_dir, commit_id, valkey_dir, cfg, benchmark_path)
         return None
 
 
+def interleave_cells(cfg: dict) -> List[tuple]:
+    """(group, scenario id) of every selected scenario, in config order."""
+    groups = cfg.get("groups_to_run")
+    scenarios = cfg.get("scenario_filter")
+    return [
+        (group.get("group"), sc.get("id"))
+        for group in cfg.get("test_groups", [])
+        if not groups or group.get("group") in groups
+        for sc in group.get("scenarios", [])
+        if not scenarios or sc.get("id") in scenarios
+    ]
+
+
+def run_interleaved_cells(
+    cfg: dict, commits: List[str], args: argparse.Namespace
+) -> None:
+    """Interleave commits within each cell rather than across whole runs.
+
+    For each scenario in turn, run k runs it on every commit with the commit
+    order rotated by k. A cell's runs of the commits being compared are then
+    seconds to minutes apart instead of a whole matrix apart.
+    """
+    n = len(commits)
+    cells = interleave_cells(cfg)
+    for c, cell in enumerate(cells):
+        cell_cfg = {**cfg, "cell_filter": {cell}}
+        for k in range(args.runs):
+            order = commits[k % n :] + commits[: k % n]
+            logging.info(
+                f"=== Cell {c + 1}/{len(cells)} {cell}, run {k + 1}/{args.runs}: "
+                f"{order} ==="
+            )
+            for slot, commit in enumerate(order):
+                run_benchmark_matrix(
+                    commit_id=commit,
+                    cfg=cell_cfg,
+                    args=args,
+                    run_state={"runs": 1, "run_offset": k, "order_slot": slot},
+                    keep_checkout=True,
+                )
+    if args.use_running_server:
+        return
+    for commit in commits:
+        ServerBuilder(
+            commit_id=commit,
+            tls_mode=cfg["tls_mode"],
+            valkey_path=f"../valkey_{commit}",
+        ).terminate_and_clean_valkey()
+
+
 def run_interleaved(cfg: dict, commits: List[str], args: argparse.Namespace) -> None:
     """Run every commit once per run, rotating the commit order each run.
 
@@ -1408,14 +1460,17 @@ def main() -> None:
             )
             continue
 
-        if args.order == "interleaved" and len(commits) > 1:
+        if args.order != "grouped" and len(commits) > 1:
             if args.valkey_path or args.module:
                 print(
-                    "ERROR: --order interleaved needs one checkout per commit; "
+                    f"ERROR: --order {args.order} needs one checkout per commit; "
                     "it cannot be combined with --valkey-path or --module"
                 )
                 sys.exit(1)
-            run_interleaved(cfg, commits, args)
+            if args.order == "interleaved-cell" and "test_groups" in cfg:
+                run_interleaved_cells(cfg, commits, args)
+            else:
+                run_interleaved(cfg, commits, args)
             continue
 
         for commit in commits:
