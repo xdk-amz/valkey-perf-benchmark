@@ -25,6 +25,15 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from generators import GeneratorError, GeneratorRequest, LoadGenerator
+from procstat import (
+    cpu_steal,
+    io_thread_index,
+    main_cpus,
+    thread_names,
+    thread_sched,
+    thread_ticks,
+    ticks,
+)
 
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 PERF_EVENTS = (
@@ -86,58 +95,6 @@ def validate_measurement(value) -> None:
         acl = value["acl"]
         if not isinstance(acl, dict) or not acl.get("user") or not acl.get("password"):
             raise ValueError("'measurement.acl' needs 'user' and 'password'")
-
-
-# ---------- /proc helpers (local server only) --------------------------------
-
-
-def thread_names(pid: int) -> Dict[int, str]:
-    out = {}
-    for tid in os.listdir(f"/proc/{pid}/task"):
-        try:
-            out[int(tid)] = Path(f"/proc/{pid}/task/{tid}/comm").read_text().strip()
-        except OSError:
-            pass
-    return out
-
-
-def thread_ticks(pid: int, tid: Optional[int] = None) -> float:
-    path = f"/proc/{pid}/task/{tid or pid}/stat" if tid else f"/proc/{pid}/stat"
-    fields = Path(path).read_text().rsplit(")", 1)[1].split()
-    return float(fields[11]) + float(fields[12])
-
-
-def thread_sched(pid: int, tid: int) -> Dict[str, float]:
-    """Run-queue wait (ns) and involuntary context switches of one thread."""
-    base = f"/proc/{pid}/task/{tid}"
-    wait_ns = float(Path(f"{base}/schedstat").read_text().split()[1])
-    nvcsw = 0.0
-    for line in Path(f"{base}/status").read_text().splitlines():
-        if line.startswith("nonvoluntary_ctxt_switches:"):
-            nvcsw = float(line.split()[1])
-    return {"wait_ns": wait_ns, "nvcsw": nvcsw}
-
-
-def cpu_steal(cpus: Optional[set] = None) -> Optional[tuple]:
-    """(steal, total) jiffies summed over ``cpus`` (all CPUs when None)."""
-    steal = total = 0.0
-    found = False
-    for line in Path("/proc/stat").read_text().splitlines():
-        name, *fields = line.split()
-        if not name.startswith("cpu") or name == "cpu":
-            continue
-        if cpus is not None and int(name[3:]) not in cpus:
-            continue
-        vals = [float(v) for v in fields[:8]]
-        steal += vals[7]
-        total += sum(vals)
-        found = True
-    return (steal, total) if found else None
-
-
-def io_thread_index(name: str) -> Optional[int]:
-    m = re.match(r"io_thd_(\d+)$", name)
-    return int(m.group(1)) if m else None
 
 
 def parse_perf_stat(text: str, cmds: float) -> Dict[str, Optional[float]]:
@@ -403,45 +360,6 @@ def _local_pids(probe, pids) -> list:
     return [p for p in pids if p and Path(f"/proc/{p}").exists()]
 
 
-def _ticks(pids, gen_pids, main_cpus) -> dict:
-    """CPU ticks and scheduler counters of every server and generator."""
-    t = {"main": {}, "sched": {}, "io": 0.0, "gen": 0.0}
-    for pid in pids:
-        names = thread_names(pid)
-        t["main"][pid] = thread_ticks(pid, pid)
-        t["io"] += sum(
-            thread_ticks(pid, tid)
-            for tid, n in names.items()
-            if io_thread_index(n) is not None
-        )
-        try:
-            t["sched"][pid] = thread_sched(pid, pid)
-        except (OSError, IndexError, ValueError):
-            pass
-    for gpid in gen_pids:
-        try:
-            t["gen"] += thread_ticks(gpid)
-        except OSError:
-            t["gen"] = None
-            break
-    t["steal"] = cpu_steal(main_cpus)
-    return t
-
-
-def _main_cpus(pids) -> Optional[set]:
-    """CPUs the main threads are confined to, or None when not confined."""
-    cpus = set()
-    for pid in pids:
-        try:
-            affinity = os.sched_getaffinity(pid)
-        except OSError:
-            return None
-        if len(affinity) >= (os.cpu_count() or 0):
-            return None
-        cpus |= affinity
-    return cpus or None
-
-
 def _run_window(parts, probe, opts, expect_keys, window, settle):
     handles = []
     try:
@@ -476,12 +394,12 @@ def _run_window(parts, probe, opts, expect_keys, window, settle):
 
         pids = _local_pids(probe, snap["pids"])
         gen_pids = [h.proc.pid for h in handles]
-        main_cpus = _main_cpus(pids) if pids else None
+        cpus = main_cpus(pids) if pids else None
 
-        def ticks():
-            return _ticks(pids, gen_pids, main_cpus) if pids else None
+        def read_ticks():
+            return ticks(pids, gen_pids, cpus) if pids else None
 
-        a, ta = probe.snapshot(), ticks()
+        a, ta = probe.snapshot(), read_ticks()
         perf_text, perf_status = "", "off"
         if opts.get("perf_counters"):
             if not pids:
@@ -501,7 +419,7 @@ def _run_window(parts, probe, opts, expect_keys, window, settle):
                 perf_status = "ok" if r.returncode == 0 else "failed"
         if not perf_text:
             time.sleep(window)
-        b, tb = probe.snapshot(), ticks()
+        b, tb = probe.snapshot(), read_ticks()
         ended_early = [not h.alive() for h in handles]
 
         if any(g.stops_at_window_edge for g, _ in parts):
@@ -568,7 +486,7 @@ def _run_window(parts, probe, opts, expect_keys, window, settle):
                 / (tb["steal"][1] - ta["steal"][1])
                 * 100
             )
-            shared["steal_scope"] = "main cpus" if main_cpus else "host"
+            shared["steal_scope"] = "main cpus" if cpus else "host"
     if perf_text:
         shared.update(parse_perf_stat(perf_text, cmds))
 

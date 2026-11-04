@@ -17,60 +17,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import binfacts
+from binfacts import binary_facts
 from environment_metadata import collect_environment_metadata
 
 HARNESS_DIR = Path(__file__).resolve().parent
 
 
 def _cmd(argv: List[str], cwd=None) -> Optional[str]:
-    try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=30, cwd=cwd)
-        return r.stdout.strip() if r.returncode == 0 else None
-    except Exception:
-        return None
-
-
-def _sha256(path: Path) -> Optional[str]:
-    try:
-        h = hashlib.sha256()
-        with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except OSError:
-        return None
-
-
-def _text_size(path: Path) -> Optional[int]:
-    out = _cmd(["size", "-A", str(path)])
-    for line in (out or "").splitlines():
-        parts = line.split()
-        if parts and parts[0] == ".text":
-            return int(parts[1])
-    return None
-
-
-def _compiler(path: Path) -> Optional[str]:
-    out = _cmd(["readelf", "-p", ".comment", str(path)])
-    for line in (out or "").splitlines():
-        if "]" in line:
-            return line.split("]", 1)[1].strip()
-    return None
+    return binfacts._cmd(argv, cwd=cwd)
 
 
 def git_state(path: Path) -> Dict[str, object]:
     sha = _cmd(["git", "rev-parse", "HEAD"], cwd=path)
     dirty = _cmd(["git", "status", "--porcelain", "--untracked-files=no"], cwd=path)
     return {"commit": sha, "dirty": bool(dirty) if dirty is not None else None}
-
-
-def binary_facts(path: Path) -> Dict[str, object]:
-    return {
-        "path": str(path),
-        "sha256": _sha256(path),
-        "text_size": _text_size(path),
-        "compiler": _compiler(path),
-    }
 
 
 def host_facts() -> Dict[str, object]:

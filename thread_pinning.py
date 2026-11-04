@@ -2,14 +2,15 @@
 
 Valkey starts its IO threads with the process, so pinning happens after launch:
 each thread's affinity is set by thread id and read back to check it held.
-Works only for a server on the local host.
+Runs on the server's host: in-process for a local server, through
+vpb_agent.py for a remote one, so it uses the standard library only.
 """
 
 import os
 import subprocess
 from typing import Dict, List, Optional
 
-from measurement import io_thread_index, thread_names
+from procstat import io_thread_index, thread_names
 from utils.cpu_utils import parse_core_range
 
 
@@ -77,8 +78,9 @@ def pinning_warnings() -> List[str]:
     try:
         r = subprocess.run(
             ["systemctl", "is-active", "irqbalance"],
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
             timeout=5,
         )
         if r.stdout.strip() == "active":
