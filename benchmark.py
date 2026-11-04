@@ -4,9 +4,11 @@
 import argparse
 import json
 import logging
+import os
 import platform
 import re
 import shlex
+import time
 import subprocess
 from itertools import product
 from pathlib import Path
@@ -33,6 +35,7 @@ from generators import DEFAULT_GENERATOR, GENERATORS, GENERATOR_NAMES
 from measurement import validate_measurement
 from thread_pinning import validate_thread_pinning
 from run_manifest import build_manifest, write_manifest
+from remote import RemoteError, RemoteSetup, SshHost, set_forwarder
 from samplers import SOURCES
 from utils.cpu_utils import (
     parse_core_range,
@@ -186,6 +189,30 @@ def parse_args() -> argparse.Namespace:
         "--target-ip",
         default="127.0.0.1",
         help="Server IP visible to the client.",
+    )
+    remote = parser.add_argument_group(
+        "remote hosts",
+        "Run the server, and optionally the load generators, on other hosts "
+        "reached over ssh. --target-ip is then the server host's address as "
+        "the generators reach it (a private IP).",
+    )
+    remote.add_argument(
+        "--server-host",
+        metavar="USER@HOST",
+        help="Build and run the server on this host.",
+    )
+    remote.add_argument(
+        "--generator-host",
+        metavar="USER@HOST",
+        help="Run load generators on this host (default: this machine). "
+        "--valkey-benchmark-path and --cachecannon-path are paths there.",
+    )
+    remote.add_argument("--ssh-key", help="ssh identity file for both hosts.")
+    remote.add_argument("--ssh-known-hosts", help="known_hosts file for both hosts.")
+    remote.add_argument(
+        "--remote-root",
+        default="~/vpb",
+        help="Working directory on the hosts (builds, logs, staged files).",
     )
     parser.add_argument(
         "--config",
@@ -684,8 +711,12 @@ def _get_active_ports(cfg: dict) -> List[int]:
     return [cfg.get("port", 6379)]
 
 
-def validate_cpu_allocation(cfg: dict) -> None:
-    """Validate CPU configuration (new cpu_allocation or old individual fields)."""
+def validate_cpu_allocation(cfg: dict, host_cpus: Optional[tuple] = None) -> None:
+    """Validate CPU configuration (new cpu_allocation or old individual fields).
+
+    ``host_cpus`` is (server host CPUs, client host CPUs) when the server runs
+    on a host of its own.
+    """
     has_cpu_allocation = "cpu_allocation" in cfg
     has_old_fields = "server_cpu_range" in cfg or "client_cpu_range" in cfg
 
@@ -707,7 +738,7 @@ def validate_cpu_allocation(cfg: dict) -> None:
         if cpu_alloc["cores_per_server"] <= 0 or cpu_alloc["cores_per_client"] <= 0:
             raise ValueError("cores_per_server and cores_per_client must be positive")
 
-        if "servers" in cpu_alloc and "clients" in cpu_alloc:
+        if "servers" in cpu_alloc and "clients" in cpu_alloc and host_cpus is None:
             server_cores = set()
             for range_str in cpu_alloc["servers"]:
                 server_cores.update(parse_core_range(range_str))
@@ -724,7 +755,9 @@ def validate_cpu_allocation(cfg: dict) -> None:
 
     # Validate explicit ranges
     if has_old_fields and "server_cpu_range" in cfg and "client_cpu_range" in cfg:
-        validate_explicit_cpu_ranges(cfg["server_cpu_range"], cfg["client_cpu_range"])
+        validate_explicit_cpu_ranges(
+            cfg["server_cpu_range"], cfg["client_cpu_range"], host_cpus
+        )
 
 
 def _validate_benchmark_args(
@@ -981,7 +1014,14 @@ def run_benchmark_matrix(
         build_args=cfg.get("build_args", []),
         repo_url=getattr(args, "valkey_repo_url", None),
     )
-    if not args.use_running_server:
+    remote = getattr(args, "remote", None)
+    remote_ctx = None
+    if remote is not None:
+        # The local checkout only supplies the source; the server host builds it.
+        builder.clone_and_checkout()
+        remote_ctx = remote.prepare(valkey_dir, cfg, args.results_dir)
+        architecture = remote_ctx["architecture"]
+    elif not args.use_running_server:
         server_binary = valkey_dir / "src" / "valkey-server"
         if args.valkey_path and commit_id != "HEAD":
             # Shared directory with explicit commit: checkout and rebuild
@@ -1014,12 +1054,16 @@ def run_benchmark_matrix(
             module_commit,
             module_commit_timestamp,
             run_state=run_state,
+            remote_ctx=remote_ctx,
         )
 
     # Cleanup
     if keep_checkout:
         return
-    if not args.use_running_server:
+    if remote is not None:
+        if not args.valkey_path:
+            builder.terminate_and_clean_valkey(terminate=False)
+    elif not args.use_running_server:
         if args.valkey_path:
             builder.terminate_valkey()
         else:
@@ -1104,6 +1148,7 @@ def _execute_benchmark_run(
     module_commit=None,
     module_commit_timestamp=None,
     run_state=None,
+    remote_ctx=None,
 ):
     """Execute a single benchmark run with specific configuration."""
     run_state = run_state or {}
@@ -1119,9 +1164,21 @@ def _execute_benchmark_run(
         if server_cpu_ranges:
             cfg["server_cpu_ranges"] = server_cpu_ranges
 
+        remote = getattr(args, "remote", None)
         launcher = ServerLauncher(
             results_dir=str(results_dir),
-            valkey_path=str(valkey_dir),
+            valkey_path=remote_ctx["server_dir"] if remote_ctx else str(valkey_dir),
+            host=remote.server if remote_ctx else None,
+            tls_dir=(
+                str(remote_ctx["tls_dir"])
+                if remote_ctx and remote_ctx["tls_dir"]
+                else None
+            ),
+            log_dir=(
+                f"{remote.server.root}/logs/{results_dir.name}/{time.time_ns()}"
+                if remote_ctx
+                else None
+            ),
             cores=(
                 cfg.get("server_cpu_ranges", [cfg.get("server_cpu_range")])[0]
                 if cfg.get("server_cpu_ranges") or cfg.get("server_cpu_range")
@@ -1145,6 +1202,7 @@ def _execute_benchmark_run(
             args.target_ip,
             tls_mode=cfg.get("tls_mode", False),
             valkey_dir=valkey_dir,
+            tls_dir=remote_ctx["tls_dir"] if remote_ctx else None,
         )
 
     # Run benchmark client
@@ -1162,8 +1220,19 @@ def _execute_benchmark_run(
             logging.info(f"Built valkey-benchmark: {benchmark_path}")
 
         cfg = _with_cli_generator_paths(cfg, args)
+        remote = getattr(args, "remote", None)
+        executor = remote.executor if remote is not None else None
+        if executor is not None:
+            executor.add_root(results_dir)
         manifest_id = _write_run_manifest(
-            results_dir, commit_id, valkey_dir, cfg, benchmark_path
+            results_dir,
+            commit_id,
+            valkey_dir,
+            cfg,
+            benchmark_path,
+            executor=executor,
+            remote=remote,
+            remote_ctx=remote_ctx,
         )
 
         runner = ClientRunner(
@@ -1185,6 +1254,9 @@ def _execute_benchmark_run(
             config_name=config_name,
             module_commit=module_commit,
             module_commit_timestamp=module_commit_timestamp,
+            executor=executor,
+            server_host=remote.server if remote_ctx else None,
+            tls_dir=remote_ctx["tls_dir"] if remote_ctx else None,
         )
 
         runner.run_offset = run_state.get("run_offset", 0)
@@ -1203,6 +1275,8 @@ def _execute_benchmark_run(
     # Shutdown server
     if launcher and not args.use_running_server:
         launcher.shutdown(cfg["tls_mode"])
+        if remote_ctx:
+            launcher.fetch_logs(results_dir / "server_logs")
 
 
 def _with_cli_generator_paths(cfg: dict, args: argparse.Namespace) -> dict:
@@ -1211,7 +1285,10 @@ def _with_cli_generator_paths(cfg: dict, args: argparse.Namespace) -> dict:
         return cfg
     cfg = dict(cfg)
     gens = {k: dict(v) for k, v in cfg.get("generators", {}).items()}
-    gens.setdefault("cachecannon", {})["path"] = str(args.cachecannon_path.resolve())
+    remote = getattr(args, "remote", None)
+    on_host = remote is not None and remote.executor is not None
+    path = args.cachecannon_path if on_host else args.cachecannon_path.resolve()
+    gens.setdefault("cachecannon", {})["path"] = str(path)
     cfg["generators"] = gens
     return cfg
 
@@ -1227,12 +1304,15 @@ def _uses_generator(cfg: dict, name: str) -> bool:
     return name == DEFAULT_GENERATOR and "test_groups" not in cfg
 
 
-def benchmark_supports_tls(path: str) -> bool:
+def benchmark_supports_tls(path: str, executor=None) -> bool:
     """True when valkey-benchmark at path was built with TLS (BUILD_TLS)."""
     try:
-        out = subprocess.run(
-            [str(path), "--help"], capture_output=True, text=True, timeout=30
-        )
+        if executor is not None:
+            out = executor.run([str(path), "--help"], timeout=60)
+        else:
+            out = subprocess.run(
+                [str(path), "--help"], capture_output=True, text=True, timeout=30
+            )
     except (OSError, subprocess.TimeoutExpired) as e:
         raise ValueError(f"cannot run valkey-benchmark at {path}: {e}") from e
     text = out.stdout + out.stderr
@@ -1244,35 +1324,51 @@ def benchmark_supports_tls(path: str) -> bool:
     return "--tls" in text
 
 
-def check_benchmark_tls(configs: List[dict], benchmark_path) -> None:
+def check_benchmark_tls(configs: List[dict], benchmark_path, executor=None) -> None:
     """Fail before any build or server start when a TLS config would run
-    valkey-benchmark from a build without TLS."""
-    if benchmark_path is None or not Path(benchmark_path).exists():
+    valkey-benchmark from a build without TLS. With ``executor`` the binary
+    is a path on the generator host."""
+    if benchmark_path is None:
+        return
+    if executor is None and not Path(benchmark_path).exists():
         return
     needs = [
         c
         for c in configs
         if c.get("tls_mode") and _uses_generator(c, DEFAULT_GENERATOR)
     ]
-    if needs and not benchmark_supports_tls(benchmark_path):
+    if needs and not benchmark_supports_tls(benchmark_path, executor):
         raise ValueError(
             f"tls_mode is on but {benchmark_path} was built without TLS; "
             "build valkey-benchmark with BUILD_TLS=yes"
         )
 
 
-def _write_run_manifest(results_dir, commit_id, valkey_dir, cfg, benchmark_path):
+def _write_run_manifest(
+    results_dir,
+    commit_id,
+    valkey_dir,
+    cfg,
+    benchmark_path,
+    executor=None,
+    remote=None,
+    remote_ctx=None,
+):
     """Record what this run executes; returns the manifest id for its rows."""
     from generators import ValkeyBenchmarkGenerator
 
     identities = []
     if _uses_generator(cfg, DEFAULT_GENERATOR) and benchmark_path:
         identities.append(
-            ValkeyBenchmarkGenerator(benchmark_path, command_builder=list).identity()
+            ValkeyBenchmarkGenerator(
+                benchmark_path, executor=executor, command_builder=list
+            ).identity()
         )
     for name, options in cfg.get("generators", {}).items():
         if options.get("path") and _uses_generator(cfg, name):
-            identities.append(GENERATORS[name](options["path"], options).identity())
+            identities.append(
+                GENERATORS[name](options["path"], options, executor=executor).identity()
+            )
     try:
         manifest = build_manifest(
             commit=commit_id,
@@ -1280,6 +1376,8 @@ def _write_run_manifest(results_dir, commit_id, valkey_dir, cfg, benchmark_path)
             build_args=cfg.get("build_args", []),
             generators=identities,
             cfg=cfg,
+            server_binary=remote_ctx["server_binary"] if remote_ctx else None,
+            hosts=remote.facts() if remote_ctx else None,
         )
         return write_manifest(Path(results_dir), manifest)
     except Exception:
@@ -1334,7 +1432,7 @@ def run_interleaved_cells(
             commit_id=commit,
             tls_mode=cfg["tls_mode"],
             valkey_path=f"../valkey_{commit}",
-        ).terminate_and_clean_valkey()
+        ).terminate_and_clean_valkey(terminate=getattr(args, "remote", None) is None)
 
 
 def run_interleaved(cfg: dict, commits: List[str], args: argparse.Namespace) -> None:
@@ -1368,7 +1466,7 @@ def run_interleaved(cfg: dict, commits: List[str], args: argparse.Namespace) -> 
             commit_id=commit,
             tls_mode=cfg["tls_mode"],
             valkey_path=f"../valkey_{commit}",
-        ).terminate_and_clean_valkey()
+        ).terminate_and_clean_valkey(terminate=getattr(args, "remote", None) is None)
 
 
 def get_module_binary_path(args: argparse.Namespace, config: dict) -> Optional[str]:
@@ -1398,6 +1496,46 @@ def get_module_binary_path(args: argparse.Namespace, config: dict) -> Optional[s
         return str(module_binary.absolute())
 
     return None
+
+
+def remote_setup(args: argparse.Namespace, configs: List[dict]):
+    """The run's remote hosts from --server-host/--generator-host, or None."""
+    if not args.server_host:
+        if args.generator_host:
+            raise ValueError("--generator-host needs --server-host")
+        return None
+    if args.use_running_server or args.mode != "both":
+        raise ValueError("--server-host starts the server itself: use --mode both")
+    if args.target_ip in ("127.0.0.1", "localhost"):
+        raise ValueError(
+            "--server-host needs --target-ip: the server host's address "
+            "as the generators reach it"
+        )
+    if args.module_path or any(c.get("modules") for c in configs):
+        raise ValueError("modules are not supported with --server-host yet")
+    if (
+        args.generator_host
+        and not args.valkey_benchmark_path
+        and any(_uses_generator(c, DEFAULT_GENERATOR) for c in configs)
+    ):
+        raise ValueError(
+            "--generator-host needs --valkey-benchmark-path: a valkey-benchmark "
+            "on the generator host, the same for every commit"
+        )
+    common = dict(
+        key=args.ssh_key, known_hosts=args.ssh_known_hosts, root=args.remote_root
+    )
+    server = SshHost(
+        args.server_host, private_ip=args.target_ip, name="server host", **common
+    )
+    generator = (
+        SshHost(args.generator_host, name="generator host", **common)
+        if args.generator_host
+        else None
+    )
+    setup = RemoteSetup(server, generator)
+    set_forwarder(server.forwarder())
+    return setup
 
 
 # ---------- Entry point ------------------------------------------------------
@@ -1431,18 +1569,33 @@ def main() -> None:
         print("ERROR: No configurations found in config file")
         sys.exit(1)
 
+    try:
+        args.remote = remote_setup(args, configs_list)
+    except (ValueError, RemoteError) as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
     benchmark_path = args.valkey_benchmark_path or (
         args.valkey_path / "src" / "valkey-benchmark" if args.valkey_path else None
     )
+    executor = args.remote.executor if args.remote is not None else None
     try:
-        check_benchmark_tls(configs_list, benchmark_path)
+        check_benchmark_tls(configs_list, benchmark_path, executor)
     except ValueError as e:
         print(f"ERROR: {e}")
         sys.exit(1)
 
+    host_cpus = None
+    if args.remote is not None:
+        facts = args.remote.facts()
+        host_cpus = (
+            facts["server_host"]["cpus"],
+            facts.get("generator_host", {}).get("cpus") or os.cpu_count(),
+        )
+
     # Use first config for initial setup
     config = configs_list[0]
-    validate_cpu_allocation(config)
+    validate_cpu_allocation(config, host_cpus)
 
     module_path = get_module_binary_path(args, config)
 
@@ -1492,7 +1645,7 @@ def main() -> None:
 
     # Process all configs
     for cfg in configs_list:
-        validate_cpu_allocation(cfg)
+        validate_cpu_allocation(cfg, host_cpus)
 
         # Apply CLI filters to this config
         if args.groups:

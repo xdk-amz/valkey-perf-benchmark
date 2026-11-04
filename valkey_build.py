@@ -91,9 +91,14 @@ class ServerBuilder:
             logging.warning(f"Failed to terminate Valkey processes: {e}")
         time.sleep(2)
 
-    def terminate_and_clean_valkey(self) -> None:
-        """Terminate all valkey processes and delete the cloned Valkey directory."""
-        self.terminate_valkey()
+    def terminate_and_clean_valkey(self, terminate: bool = True) -> None:
+        """Terminate all valkey processes and delete the cloned Valkey directory.
+
+        ``terminate`` is False when the servers ran on another host and this
+        checkout only supplied their source.
+        """
+        if terminate:
+            self.terminate_valkey()
         if self.valkey_dir.exists():
             logging.info(f"Removing Valkey directory {self.valkey_dir}")
             shutil.rmtree(self.valkey_dir)

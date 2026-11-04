@@ -1,6 +1,8 @@
 """Launch local Valkey servers for benchmark runs."""
 
 import logging
+import shlex
+import signal
 import os
 import re
 import subprocess
@@ -10,6 +12,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 import valkey
+
+from remote import connect_addr
 
 # Constants
 VALKEY_SERVER = "src/valkey-server"
@@ -46,6 +50,7 @@ def apply_config_to_servers(
     target_ip: str,
     tls_mode: bool = False,
     valkey_dir: Optional[Path] = None,
+    tls_dir: Optional[Path] = None,
 ) -> None:
     """Apply CONFIG SET commands to all server nodes.
 
@@ -55,12 +60,13 @@ def apply_config_to_servers(
         target_ip: Host IP of the server(s).
         tls_mode: Whether to connect with TLS.
         valkey_dir: Path to valkey directory (needed for TLS cert paths).
+        tls_dir: The certificates' directory, when not valkey_dir/tests/tls.
     """
     kwargs_base = {"decode_responses": True, "socket_timeout": 30}
     if tls_mode:
-        if valkey_dir is None:
+        if valkey_dir is None and tls_dir is None:
             raise ValueError("valkey_dir is required when tls_mode is True")
-        tls_cert_path = Path(valkey_dir) / "tests" / "tls"
+        tls_cert_path = Path(tls_dir) if tls_dir else Path(valkey_dir) / "tests" / "tls"
         if not tls_cert_path.exists():
             raise FileNotFoundError(f"TLS certificates not found at {tls_cert_path}")
         kwargs_base.update(
@@ -73,7 +79,8 @@ def apply_config_to_servers(
         )
 
     for port in ports:
-        client = valkey.Valkey(host=target_ip, port=port, **kwargs_base)
+        host, cport = connect_addr(target_ip, port)
+        client = valkey.Valkey(host=host, port=cport, **kwargs_base)
         try:
             for k, v in config_set.items():
                 client.execute_command("CONFIG", "SET", k, str(v))
@@ -126,8 +133,17 @@ class ServerLauncher:
         valkey_path: str = "../valkey",
         cores: Optional[str] = None,
         target_ip: str = "127.0.0.1",
+        host=None,
+        tls_dir: Optional[str] = None,
+        log_dir: Optional[str] = None,
     ) -> None:
         self.results_dir = results_dir
+        # With ``host`` (remote.SshHost) the server runs on that host:
+        # ``valkey_path`` and ``log_dir`` are paths there, and ``tls_dir``
+        # is this machine's copy of the server's test certificates.
+        self.host = host
+        self.tls_dir = tls_dir
+        self.log_dir = log_dir
         self.valkey_path = valkey_path
         self.cores = cores
         self.target_ip = target_ip
@@ -135,6 +151,14 @@ class ServerLauncher:
         self.cluster_nodes = []  # Track multiple node processes
         self.port = DEFAULT_PORT
         self.thread_layout = None  # thread -> CPUs after thread_pinning
+
+    def _log_dir(self) -> Path:
+        if self.log_dir:
+            return Path(self.log_dir)
+        return Path.cwd() / self.results_dir
+
+    def _server_path(self) -> str:
+        return f"{self.valkey_path}/{VALKEY_SERVER}"
 
     def _create_client(
         self, tls_mode: bool, host: str = "127.0.0.1", port: int = DEFAULT_PORT
@@ -147,8 +171,12 @@ class ServerLauncher:
             "socket_timeout": 30,
             "socket_connect_timeout": 30,
         }
+        host, port = connect_addr(host, port)
+        kwargs["host"], kwargs["port"] = host, port
         if tls_mode:
-            tls_cert_path = Path(self.valkey_path) / "tests" / "tls"
+            tls_cert_path = Path(
+                self.tls_dir or Path(self.valkey_path) / "tests" / "tls"
+            )
             if not tls_cert_path.exists():
                 raise FileNotFoundError(
                     f"TLS certificates not found at {tls_cert_path}"
@@ -171,6 +199,13 @@ class ServerLauncher:
         cmd_list = list(command)
         cmd_str = " ".join(cmd_list)
         logging.info(f"Running: {cmd_str}")
+
+        if self.host is not None:
+            result = self.host.run(cmd_list, cwd=cwd, timeout=timeout, check=False)
+            if result.returncode != 0:
+                logging.error(f"Command failed on {self.host.name}: {result.stderr}")
+                raise RuntimeError(f"Command failed: {cmd_str}")
+            return result
 
         try:
             result = subprocess.run(
@@ -325,11 +360,11 @@ class ServerLauncher:
         start = time.time()
         while time.time() - start < timeout:
             try:
-                result = subprocess.run(
-                    ["ss", "-tlnp", f"sport = :{port}"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
+                argv = ["ss", "-tlnp", f"sport = :{port}"]
+                result = (
+                    self.host.run(argv, timeout=15, check=False)
+                    if self.host is not None
+                    else subprocess.run(argv, capture_output=True, text=True, timeout=5)
                 )
                 # If no lines with the port in LISTEN state, port is free
                 lines = [l for l in result.stdout.strip().split("\n")[1:] if l.strip()]
@@ -393,8 +428,7 @@ class ServerLauncher:
     ) -> None:
         """Start Valkey server."""
         log_file = str(
-            Path.cwd()
-            / self.results_dir
+            self._log_dir()
             / f"valkey_log_cluster_{'enabled' if cluster_mode else 'disabled'}_tls_{'enabled' if tls_mode else 'disabled'}.log"
         )
 
@@ -496,11 +530,7 @@ class ServerLauncher:
         node_id: int,
     ) -> None:
         """Launch a single cluster node."""
-        log_file = str(
-            Path.cwd()
-            / self.results_dir
-            / f"valkey_cluster_node{node_id}_port{port}.log"
-        )
+        log_file = str(self._log_dir() / f"valkey_cluster_node{node_id}_port{port}.log")
 
         cmd = self._build_server_command(
             port=port,
@@ -594,6 +624,8 @@ class ServerLauncher:
         custom_configs = (self.config or {}).get("custom-server-configs") or {}
         if str(custom_configs.get("ext-storage-enabled", "")).lower() != "yes":
             return
+        if self.host is not None:
+            raise RuntimeError("ext-storage needs a server on this host")
         storage_path = str(custom_configs.get("ext-storage-path", ""))
         if not storage_path:
             return
@@ -643,6 +675,8 @@ class ServerLauncher:
             self.modules = []
 
         self._reset_ext_storage_file()
+        if self.host is not None and self.log_dir:
+            self.host.script(f"mkdir -p {shlex.quote(self.log_dir)}")
 
         try:
             if cluster_mode and config and "cluster_nodes" in config:
@@ -697,7 +731,12 @@ class ServerLauncher:
             pid = int(client.info("server")["process_id"])
         # IO threads start with the server; give them a moment to be named.
         time.sleep(0.3)
-        self.thread_layout = pin_server_threads(pid, spec, io_threads)
+        if self.host is not None:
+            self.thread_layout = self.host.agent(
+                "pin", pid=pid, spec=spec, io_threads=io_threads
+            )["layout"]
+        else:
+            self.thread_layout = pin_server_threads(pid, spec, io_threads)
         logging.info(f"Pinned server threads: {self.thread_layout}")
 
     def shutdown(self, tls_mode: bool) -> None:
@@ -728,12 +767,18 @@ class ServerLauncher:
                     if cluster_config_dir == "."
                     else cluster_config_dir
                 )
-                subprocess.run(
-                    ["bash", "-c", "rm -f nodes-*.conf"],
-                    cwd=cleanup_path,
-                    timeout=5,
-                    check=False,
-                )
+                if self.host is not None:
+                    self.host.script(
+                        f"cd {shlex.quote(str(cleanup_path))} && rm -f nodes-*.conf",
+                        check=False,
+                    )
+                else:
+                    subprocess.run(
+                        ["bash", "-c", "rm -f nodes-*.conf"],
+                        cwd=cleanup_path,
+                        timeout=5,
+                        check=False,
+                    )
                 logging.info("Cleaned cluster config files")
             except Exception as e:
                 logging.warning(f"Could not clean cluster config files: {e}")
@@ -749,12 +794,31 @@ class ServerLauncher:
         # Wait for all processes to stop (escalates to SIGKILL if needed)
         self._wait_for_process_shutdown()
 
+    def _signal_servers(self, sig) -> None:
+        if self.host is not None:
+            self.host.agent("kill", binary=self._server_path(), sig=int(sig))
+            return
+        flag = ["-9"] if sig == signal.SIGKILL else []
+        subprocess.run(["pkill", *flag, "-f", VALKEY_SERVER], timeout=5, check=False)
+
+    def fetch_logs(self, dest: Path) -> None:
+        """Copy a remote server's log files into ``dest``."""
+        if self.host is not None and self.log_dir:
+            self.host.get_tree(self.log_dir, Path(dest))
+
     def _valkey_processes_running(self) -> bool:
         """Check if any valkey-server processes are running."""
         return bool(self._get_valkey_pids())
 
     def _get_valkey_pids(self) -> List[str]:
         """Get PIDs of running valkey-server processes."""
+        if self.host is not None:
+            # Matched by executable, not command line: the agent's own
+            # command line names the server's path.
+            return [
+                str(p)
+                for p in self.host.agent("pids", binary=self._server_path())["pids"]
+            ]
         try:
             result = subprocess.run(
                 ["pgrep", "-f", VALKEY_SERVER],
@@ -786,7 +850,7 @@ class ServerLauncher:
             f"Sending SIGTERM to PIDs: {remaining_pids}"
         )
         try:
-            subprocess.run(["pkill", "-f", VALKEY_SERVER], timeout=5, check=False)
+            self._signal_servers(signal.SIGTERM)
         except Exception as e:
             logging.warning(f"SIGTERM via pkill failed: {e}")
 
@@ -804,7 +868,7 @@ class ServerLauncher:
             f"SIGTERM ineffective. Sending SIGKILL to PIDs: {remaining_pids}"
         )
         try:
-            subprocess.run(["pkill", "-9", "-f", VALKEY_SERVER], timeout=5, check=False)
+            self._signal_servers(signal.SIGKILL)
         except Exception as e:
             logging.warning(f"SIGKILL via pkill failed: {e}")
 

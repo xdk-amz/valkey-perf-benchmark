@@ -27,7 +27,35 @@ class GeneratorError(RuntimeError):
 
 
 class Executor:
-    """Starts processes on the generator's host. This one is the local host."""
+    """Starts processes on the generator's host. This one is the local host;
+    remote.SshExecutor runs them on another host over ssh."""
+
+    remote = False
+    host = None
+
+    def path(self, local) -> str:
+        """How a process on the generator host names a local file."""
+        return str(local)
+
+    def start(
+        self, argv: List[str], out_path: Path, err_path: Path, cwd=None, workdir=None
+    ):
+        """Start argv with stdout and stderr in the given files."""
+        with Path(out_path).open("w") as o, Path(err_path).open("w") as e:
+            return self.popen(argv, o, e, cwd=cwd)
+
+    def run(self, argv: List[str], cwd=None, timeout=None, capture_output=True):
+        return subprocess.run(
+            argv, cwd=cwd, timeout=timeout, capture_output=capture_output, text=True
+        )
+
+    def identity(self, binary: str) -> Dict[str, object]:
+        digest = None
+        try:
+            digest = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
+        except OSError:
+            pass
+        return {"path": binary, "sha256": digest}
 
     def popen(self, argv: List[str], stdout, stderr, cwd=None) -> subprocess.Popen:
         logging.info(f"Starting generator: {shlex.join(argv)}")
@@ -126,9 +154,10 @@ class LoadGenerator(ABC):
             argv = ["taskset", "-c", req.cpu_range, *argv]
         out = req.workdir / f"{self.name}.out"
         err = req.workdir / f"{self.name}.err"
-        with out.open("w") as o, err.open("w") as e:
-            proc = self.executor.popen(argv, o, e, cwd=req.cwd)
-        return RunHandle(proc, argv, out, err, time.time(), self.label(req.scenario))
+        proc = self.executor.start(argv, out, err, cwd=req.cwd, workdir=req.workdir)
+        return RunHandle(
+            proc, list(proc.args), out, err, time.time(), self.label(req.scenario)
+        )
 
     def label(self, scenario: dict) -> str:
         """The command label recorded in the row's ``command`` field."""
@@ -157,25 +186,18 @@ class LoadGenerator(ABC):
 
     def version(self) -> str:
         try:
-            r = subprocess.run(
-                [self.binary, "--version"], capture_output=True, text=True, timeout=10
-            )
+            r = self.executor.run([self.binary, "--version"], timeout=10)
             return (r.stdout or r.stderr).strip().splitlines()[0]
         except Exception:
             return "unknown"
 
     def identity(self) -> Dict[str, object]:
         """Name, version and binary digest, for the run manifest."""
-        digest = None
-        try:
-            digest = hashlib.sha256(Path(self.binary).read_bytes()).hexdigest()
-        except OSError:
-            pass
         return {
             "name": self.name,
             "binary": self.binary,
             "version": self.version(),
-            "sha256": digest,
+            "sha256": self.executor.identity(self.binary).get("sha256"),
         }
 
 

@@ -25,6 +25,7 @@ from environment_metadata import collect_environment_metadata
 from generators import (
     DEFAULT_GENERATOR,
     GENERATORS,
+    Executor,
     GeneratorRequest,
     ValkeyBenchmarkGenerator,
     run_for_duration,
@@ -37,6 +38,7 @@ from measurement import (
 )
 from thread_pinning import pinning_warnings
 from metrics_sampler import is_local_address
+from remote import connect_addr
 
 # Constants
 VALKEY_BENCHMARK = "src/valkey-benchmark"
@@ -174,8 +176,17 @@ class ClientRunner:
         config_name: Optional[str] = None,
         module_commit: Optional[str] = None,
         module_commit_timestamp: Optional[str] = None,
+        executor: Optional[Executor] = None,
+        server_host=None,
+        tls_dir: Optional[Path] = None,
     ) -> None:
         self.commit_id = commit_id
+        # Where load generators run (the local host unless remote), the
+        # server's host when it is remote, and the orchestrator's copy of the
+        # server's TLS certificates.
+        self.executor = executor or Executor()
+        self.server_host = server_host
+        self.tls_dir = Path(tls_dir) if tls_dir else None
         self.config = config
         self.cluster_mode = cluster_mode
         self.tls_mode = tls_mode
@@ -207,7 +218,7 @@ class ClientRunner:
         """Return the valkey-py TLS arguments, empty when TLS is off."""
         if not self.tls_mode:
             return {}
-        tls_cert_path = Path(self.valkey_path) / "tests" / "tls"
+        tls_cert_path = self._local_tls_dir()
         if not tls_cert_path.exists():
             raise FileNotFoundError(f"TLS certificates not found at {tls_cert_path}")
         return {
@@ -216,6 +227,26 @@ class ClientRunner:
             "ssl_keyfile": str(tls_cert_path / "valkey.key"),
             "ssl_ca_certs": str(tls_cert_path / "ca.crt"),
         }
+
+    def _environment_metadata(self) -> dict:
+        """Environment fields for every row, read on the server's host."""
+        ranges = {
+            "server_cpu_range": self.config.get("server_cpu_range"),
+            "client_cpu_range": self.cores,
+        }
+        if self.server_host is None:
+            return collect_environment_metadata(
+                benchmark_path=self.valkey_benchmark_path, **ranges
+            )
+        meta = self.server_host.agent("envmeta", **ranges)
+        r = self.executor.run(
+            [str(self.valkey_benchmark_path), "--version"], timeout=30
+        )
+        meta["benchmark_tool_version"] = (r.stdout or "").strip() or "unknown"
+        return meta
+
+    def _local_tls_dir(self) -> Path:
+        return self.tls_dir or Path(self.valkey_path) / "tests" / "tls"
 
     def _create_client(
         self,
@@ -227,8 +258,9 @@ class ClientRunner:
         if port is None:
             port = self.config.get("port", DEFAULT_PORT)
         logging.info(f"Connecting to {self.target_ip}:{port}")
+        host, port = connect_addr(self.target_ip, port)
         return valkey.Valkey(
-            host=self.target_ip,
+            host=host,
             port=port,
             decode_responses=True,
             socket_timeout=socket_timeout,
@@ -265,6 +297,17 @@ class ClientRunner:
         cmd_list = list(command)
         cmd_str = shlex.join(cmd_list)
         logging.info(f"Running: {cmd_str}")
+
+        if self.executor.remote:
+            result = self.executor.run(cmd_list, cwd=cwd, timeout=timeout)
+            if result.returncode != 0:
+                logging.error(
+                    f"Command failed with exit code {result.returncode}: {cmd_str}"
+                )
+                if result.stderr:
+                    logging.error(f"Command stderr: {result.stderr}")
+                raise RuntimeError(f"Command failed: {cmd_str}")
+            return result if capture_output else None
 
         try:
             result = subprocess.run(
@@ -386,6 +429,7 @@ class ClientRunner:
             self.target_ip,
             tls_mode=self.tls_mode,
             valkey_dir=self.valkey_path,
+            tls_dir=self.tls_dir,
         )
 
     def _populate_keyspace(
@@ -596,10 +640,15 @@ class ClientRunner:
 
         use_tls = tls if tls is not None else self.tls_mode
         if use_tls:
+            tls = (
+                self.executor.path(self._local_tls_dir())
+                if self.executor.remote
+                else "./tests/tls"
+            )
             cmd += ["--tls"]
-            cmd += ["--cert", "./tests/tls/valkey.crt"]
-            cmd += ["--key", "./tests/tls/valkey.key"]
-            cmd += ["--cacert", "./tests/tls/ca.crt"]
+            cmd += ["--cert", f"{tls}/valkey.crt"]
+            cmd += ["--key", f"{tls}/valkey.key"]
+            cmd += ["--cacert", f"{tls}/ca.crt"]
 
         cmd += ["-h", self.target_ip]
         cmd += ["-p", str(port or self.config.get("port", DEFAULT_PORT))]
@@ -868,11 +917,7 @@ class ClientRunner:
 
         metrics_processor = None
         if not profiling_enabled:
-            env_metadata = collect_environment_metadata(
-                benchmark_path=self.valkey_benchmark_path,
-                server_cpu_range=self.config.get("server_cpu_range"),
-                client_cpu_range=self.cores,
-            )
+            env_metadata = self._environment_metadata()
             metrics_processor = MetricsProcessor(
                 self.commit_id,
                 self.cluster_mode,
@@ -1166,6 +1211,9 @@ class ClientRunner:
         self, profiler, scenario_profiling_enabled, effective_profiling, profile_id
     ):
         """Start profiling for a scenario when a profiler is enabled."""
+        if profiler and scenario_profiling_enabled and self.server_host is not None:
+            logging.warning("Profiling needs a local server; skipped for a remote one")
+            return
         if profiler and scenario_profiling_enabled:
             target_port = self._get_active_ports()[0] if self._is_cme() else None
             if target_port:
@@ -1260,7 +1308,9 @@ class ClientRunner:
             cpu_range=options.get("cpu_range"),
             # The framework started the server here, so the host sources
             # describe it whatever address the client was pointed at.
-            server_local=True if self.server_launcher is not None else None,
+            server_local=(
+                (self.server_host is None) if self.server_launcher is not None else None
+            ),
             start_delay=start_delay,
         )
 
@@ -1481,6 +1531,7 @@ class ClientRunner:
         if name == DEFAULT_GENERATOR:
             return ValkeyBenchmarkGenerator(
                 self.valkey_benchmark_path,
+                executor=self.executor,
                 command_builder=self._build_benchmark_command,
             )
         if name not in GENERATORS:
@@ -1489,7 +1540,7 @@ class ClientRunner:
         path = options.pop("path", None)
         if not path:
             raise ValueError(f"generators.{name}.path is not set")
-        return GENERATORS[name](path, options)
+        return GENERATORS[name](path, options, executor=self.executor)
 
     def _generator_request(self, scenario: dict, seed_val, duration_s: int):
         test_id = scenario.get("id", "unknown")
@@ -1500,7 +1551,7 @@ class ClientRunner:
             workdir=self.results_dir / "runs" / f"{test_id}_run{self.current_run}",
             duration_s=duration_s,
             tls=self.tls_mode,
-            tls_dir=Path(self.valkey_path) / "tests" / "tls" if self.tls_mode else None,
+            tls_dir=self._local_tls_dir() if self.tls_mode else None,
             cluster=self._should_add_cluster_flag(scenario),
             cpu_range=self.client_cpu_ranges[0] if self.client_cpu_ranges else None,
             threads=self.benchmark_threads,
@@ -1532,9 +1583,12 @@ class ClientRunner:
     # ---------- measured runs ----------------------------------------------
 
     def _probe_client(self, user=None, password=None, port=None):
+        host, port = connect_addr(
+            self.target_ip, port or self.config.get("port", DEFAULT_PORT)
+        )
         return valkey.Valkey(
-            host=self.target_ip,
-            port=port or self.config.get("port", DEFAULT_PORT),
+            host=host,
+            port=port,
             username=user,
             password=password,
             decode_responses=True,
@@ -1562,8 +1616,45 @@ class ClientRunner:
 
         return ServerProbe(
             [factory(port) for port in ports],
-            local=is_local_address(self.target_ip),
+            local=self.server_host is None and is_local_address(self.target_ip),
+            host=self.server_host,
+            nodes=(
+                self._probe_nodes(ports, user, password) if self.server_host else None
+            ),
         )
+
+    def _probe_nodes(self, ports, user, password) -> List[dict]:
+        """valkey-cli argv per node, for reading INFO on the server's host."""
+        server_dir = self.server_launcher.valkey_path
+        auth = ["--user", user, "--pass", password] if password else []
+        tls = []
+        if self.tls_mode:
+            d = f"{server_dir}/tests/tls"
+            tls = [
+                "--tls",
+                "--cert",
+                f"{d}/valkey.crt",
+                "--key",
+                f"{d}/valkey.key",
+                "--cacert",
+                f"{d}/ca.crt",
+            ]
+        return [
+            {
+                "port": port,
+                "cli": [
+                    f"{server_dir}/src/valkey-cli",
+                    "-h",
+                    self.target_ip,
+                    "-p",
+                    str(port),
+                    "--no-auth-warning",
+                    *auth,
+                    *tls,
+                ],
+            }
+            for port in ports
+        ]
 
     def _admin_factories(self):
         return [
@@ -1915,6 +2006,11 @@ class ClientRunner:
         self, sub_scenario: dict, port: int, process_idx: int, label: str
     ):
         """Launch a single benchmark subprocess for a mixed sub-scenario."""
+        if self.executor.remote:
+            raise RuntimeError(
+                "unmeasured mixed and parallel scenarios run valkey-benchmark "
+                "locally; set 'measurement' to run them on a remote generator host"
+            )
         cpu = self._get_cpu_for_mixed_process(process_idx)
         cmd = self._build_benchmark_command(
             scenario=sub_scenario, port=port, cpu_range=cpu
@@ -2208,6 +2304,11 @@ class ClientRunner:
             port_assignments = ports
             cpu_assignments = client_cpu_ranges
 
+        if self.executor.remote:
+            raise RuntimeError(
+                "unmeasured mixed and parallel scenarios run valkey-benchmark "
+                "locally; set 'measurement' to run them on a remote generator host"
+            )
         processes = []
         for i, (port, cpu_range) in enumerate(zip(port_assignments, cpu_assignments)):
             cmd = self._build_benchmark_command(

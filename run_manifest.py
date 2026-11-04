@@ -59,7 +59,11 @@ def build_manifest(
     build_args: List[str],
     generators: List[Dict[str, object]],
     cfg: dict,
+    server_binary: Optional[Dict[str, object]] = None,
+    hosts: Optional[Dict[str, dict]] = None,
 ) -> dict:
+    """``server_binary`` and ``hosts`` describe a server built and run on
+    another host (and its generator host), read there."""
     server = (valkey_dir / "src" / "valkey-server").resolve()
     effective = {
         k: v
@@ -69,12 +73,13 @@ def build_manifest(
     return {
         "commit_ref": commit,
         "valkey": {**git_state(valkey_dir), "build_args": list(build_args)},
-        "server_binary": binary_facts(server),
+        "server_binary": server_binary or binary_facts(server),
         "generators": generators,
         "harness": git_state(HARNESS_DIR),
         "config": json.loads(json.dumps(effective, default=sorted)),
         "argv": sys.argv,
         "host": host_facts(),
+        **(hosts or {}),
     }
 
 

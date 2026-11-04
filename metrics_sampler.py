@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Optional
 
 import valkey
 
+from remote import connect_addr
+
 from samplers import DEFAULT_SOURCES, SOURCES, SamplerContext, SampleSource
 from utils.cpu_utils import parse_core_range
 
@@ -35,6 +37,7 @@ SOCKET_TIMEOUT_SEC = 2
 
 def create_client(host: str, port: int, tls_kwargs: Dict[str, Any]) -> valkey.Valkey:
     """Return a client whose INFO replies are the raw text the server sent."""
+    host, port = connect_addr(host, port)
     client = valkey.Valkey(
         host=host,
         port=port,

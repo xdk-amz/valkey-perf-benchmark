@@ -33,6 +33,7 @@ from procstat import (
     thread_sched,
     thread_ticks,
     ticks,
+    ticks_from_json,
 )
 
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
@@ -127,12 +128,16 @@ class ServerProbe:
     of a cluster. A snapshot sums commands, clients and keys over the nodes
     and keeps main-thread figures per node."""
 
-    def __init__(self, client_factory, local: bool):
+    def __init__(self, client_factory, local: bool, host=None, nodes=None):
         factories = (
             client_factory if isinstance(client_factory, list) else [client_factory]
         )
         self.factories = factories
         self.local = local
+        # A remote server's host (remote.SshHost) and, per node, the
+        # valkey-cli argv that reads its INFO there.
+        self.host = host
+        self.nodes = nodes or []
         self._clients = [None] * len(factories)
 
     def clients(self) -> list:
@@ -159,22 +164,57 @@ class ServerProbe:
         t0 = time.time()
         infos = [c.info("everything") for c in self.clients()]
         t1 = time.time()
-        actives = [info.get("used_active_time_main_thread") for info in infos]
-        return {
-            "t": (t0 + t1) / 2,
-            "cmds": sum(int(i.get("total_commands_processed", 0)) for i in infos),
-            "active_main_s": None if None in actives else actives,
-            # Each node counts the probe's own connection.
-            "clients": sum(int(i.get("connected_clients", 0)) - 1 for i in infos),
-            "pids": [int(i.get("process_id", 0)) for i in infos],
-            "version": infos[0].get("valkey_version") or infos[0].get("redis_version"),
-            "keys": sum(
-                v.get("keys", 0)
-                for info in infos
-                for k, v in info.items()
-                if k.startswith("db") and isinstance(v, dict)
-            ),
-        }
+        return _snapshot_from_infos(infos, (t0 + t1) / 2)
+
+
+def _info_value(v: str):
+    try:
+        return int(v)
+    except ValueError:
+        pass
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
+def parse_info_text(text: str) -> dict:
+    """INFO as valkey-cli prints it, parsed the way valkey-py parses it
+    for the fields a snapshot reads."""
+    out = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        if k.startswith("db") and k[2:].isdigit():
+            out[k] = {
+                a: _info_value(b) for a, b in (kv.split("=", 1) for kv in v.split(","))
+            }
+        elif k.endswith("_version"):
+            out[k] = v
+        else:
+            out[k] = _info_value(v)
+    return out
+
+
+def _snapshot_from_infos(infos: list, t: float) -> dict:
+    actives = [info.get("used_active_time_main_thread") for info in infos]
+    return {
+        "t": t,
+        "cmds": sum(int(i.get("total_commands_processed", 0)) for i in infos),
+        "active_main_s": None if None in actives else actives,
+        # Each node counts the probe's own connection.
+        "clients": sum(int(i.get("connected_clients", 0)) - 1 for i in infos),
+        "pids": [int(i.get("process_id", 0)) for i in infos],
+        "version": infos[0].get("valkey_version") or infos[0].get("redis_version"),
+        "keys": sum(
+            v.get("keys", 0)
+            for info in infos
+            for k, v in info.items()
+            if k.startswith("db") and isinstance(v, dict)
+        ),
+    }
 
 
 # ---------- ACL user -----------------------------------------------------------
@@ -200,13 +240,20 @@ def restore_default_user(client) -> None:
 # ---------- measured run -----------------------------------------------------
 
 
-def _server_asserts(clients) -> Optional[int]:
+def _server_asserts(clients, host=None) -> Optional[int]:
     found = None
     for client in clients:
         try:
             log = client.config_get("logfile").get("logfile")
-            if log and Path(log).exists():
+            if not log:
+                continue
+            if host is not None:
+                text = host.agent("read", path=log, max_bytes=1 << 20)["text"]
+            elif Path(log).exists():
                 text = Path(log).read_text(errors="replace")
+            else:
+                text = None
+            if text is not None:
                 found = (found or 0) + len(ASSERT_PATTERN.findall(text))
         except Exception:
             pass
@@ -324,11 +371,15 @@ def run_measured_parts(
     afterwards through the probe, which authenticates as the bench user.
     """
     window, settle = opts["window"], opts["settle"]
+    timed = probe.host is not None or any(g.executor.remote for g, _ in parts)
+    # A window timed on the hosts opens WINDOW_LEAD_S after it is scheduled,
+    # and readiness checks over ssh take longer than local ones.
+    lead = int(WINDOW_LEAD_S) + 3 if timed else 0
     for generator, req in parts:
         if generator.stops_at_window_edge:
-            req.duration_s = opts["ready_timeout"] + settle + window + 30
+            req.duration_s = opts["ready_timeout"] + settle + lead + window + 30
         else:
-            req.duration_s = 2 + settle + window + 2
+            req.duration_s = 2 + settle + lead + window + 2
     acl = opts.get("acl")
     if acl:
         factories = (
@@ -358,6 +409,146 @@ def _local_pids(probe, pids) -> list:
     if not probe.local:
         return []
     return [p for p in pids if p and Path(f"/proc/{p}").exists()]
+
+
+def _local_window(handles, parts, probe, snap, opts, window):
+    """Window read in-process: server and generators on this host."""
+    pids = _local_pids(probe, snap["pids"])
+    gen_pids = [h.proc.pid for h in handles]
+    cpus = main_cpus(pids) if pids else None
+
+    def read_ticks():
+        return ticks(pids, gen_pids, cpus) if pids else None
+
+    a, ta = probe.snapshot(), read_ticks()
+    perf_text, perf_status = "", "off"
+    if opts.get("perf_counters"):
+        if not pids:
+            perf_status = "unavailable: server not local"
+        elif len(pids) > 1:
+            perf_status = "unavailable: more than one server"
+        elif not shutil.which("perf"):
+            perf_status = "unavailable: perf not installed"
+        else:
+            r = subprocess.run(
+                ["perf", "stat", "-e", PERF_EVENTS, "-t", str(pids[0]), "--"]
+                + ["sleep", str(window)],
+                capture_output=True,
+                text=True,
+            )
+            perf_text = r.stderr
+            perf_status = "ok" if r.returncode == 0 else "failed"
+    if not perf_text:
+        time.sleep(window)
+    b, tb = probe.snapshot(), read_ticks()
+    return a, b, ta, tb, pids, cpus, perf_text, perf_status
+
+
+# Time between scheduling a window and its start, enough for every host's
+# agent to be running when it opens.
+WINDOW_LEAD_S = 3.0
+
+
+def _sleep_until(t: float) -> None:
+    time.sleep(max(0.0, t - time.time()))
+
+
+def _timed_window(handles, parts, probe, snap, opts, window):
+    """Window at an absolute start time, read on each host's own clock.
+
+    A remote server's INFO and /proc counters, and each remote generator
+    host's generator CPU, are read by vpb_agent.py on that host at ``at`` and
+    ``at + window``, so ssh latency never lands inside the window (the hosts'
+    clocks are expected to be NTP-synced). A local server or generator is
+    read in-process at the same times.
+    """
+    gen_hosts, local_gen = {}, []
+    for (generator, _), handle in zip(parts, handles):
+        if generator.executor.remote:
+            host = generator.executor.host
+            gen_hosts.setdefault(id(host), (host, []))[1].append(handle.proc.pid)
+        else:
+            local_gen.append(handle.proc.pid)
+    perf = PERF_EVENTS if opts.get("perf_counters") else None
+    at = time.time() + WINDOW_LEAD_S
+    server_wait = None
+    if probe.host is not None:
+        server_wait = probe.host.agent_start(
+            "window",
+            at=at,
+            window=window,
+            nodes=probe.nodes,
+            pids=snap["pids"],
+            perf=perf,
+        )
+    gen_waits = [
+        host.agent_start("window", at=at, window=window, gen_pids=gpids)
+        for host, gpids in gen_hosts.values()
+    ]
+    pids = [] if probe.host is not None else _local_pids(probe, snap["pids"])
+    cpus = main_cpus(pids) if pids else None
+    perf_text, perf_status = "", "off"
+    perf_proc = None
+    if perf and probe.host is None:
+        if len(pids) != 1:
+            perf_status = "unavailable: server not local or more than one"
+        elif not shutil.which("perf"):
+            perf_status = "unavailable: perf not installed"
+
+    _sleep_until(at)
+    if probe.host is None:
+        if perf and perf_status == "off":
+            perf_proc = subprocess.Popen(
+                ["perf", "stat", "-e", PERF_EVENTS, "-t", str(pids[0]), "--"]
+                + ["sleep", str(window)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        a = probe.snapshot()
+        ta = ticks(pids, local_gen, cpus) if pids else None
+    gen_a = ticks([], local_gen, None)["gen"] if local_gen else 0.0
+    _sleep_until(at + window)
+    if probe.host is None:
+        b = probe.snapshot()
+        tb = ticks(pids, local_gen, cpus) if pids else None
+    gen_b = ticks([], local_gen, None)["gen"] if local_gen else 0.0
+    gen_delta = None if gen_a is None or gen_b is None else gen_b - gen_a
+
+    if server_wait is not None:
+        res = server_wait(timeout=WINDOW_LEAD_S + window + 120)
+        a = _snapshot_from_infos(
+            [parse_info_text(t) for t in res["a"]["infos"]], res["a"]["t"]
+        )
+        b = _snapshot_from_infos(
+            [parse_info_text(t) for t in res["b"]["infos"]], res["b"]["t"]
+        )
+        ta = ticks_from_json(res["a"].get("ticks"))
+        tb = ticks_from_json(res["b"].get("ticks"))
+        pids = res["local_pids"]
+        cpus = set(res["main_cpus"]) if res.get("main_cpus") else None
+        if perf:
+            perf_text = res.get("perf_text") or ""
+            perf_status = res.get("perf_status") or (
+                "ok" if res.get("perf_rc") == 0 else "failed"
+            )
+    elif perf_proc is not None:
+        _, perf_text = perf_proc.communicate(timeout=window + 30)
+        perf_status = "ok" if perf_proc.returncode == 0 else "failed"
+    for wait in gen_waits:
+        res = wait(timeout=WINDOW_LEAD_S + window + 120)
+        ga = (res["a"].get("ticks") or {}).get("gen")
+        gb = (res["b"].get("ticks") or {}).get("gen")
+        if gen_delta is None or ga is None or gb is None:
+            gen_delta = None
+        else:
+            gen_delta += gb - ga
+    if ta and tb:
+        # Generator CPU may come from several hosts; keep only its total.
+        ta["gen"], tb["gen"] = (
+            (0.0, gen_delta) if gen_delta is not None else (None, None)
+        )
+    return a, b, ta, tb, pids, cpus, perf_text, perf_status
 
 
 def _run_window(parts, probe, opts, expect_keys, window, settle):
@@ -392,34 +583,11 @@ def _run_window(parts, probe, opts, expect_keys, window, settle):
                 )
         time.sleep(settle)
 
-        pids = _local_pids(probe, snap["pids"])
-        gen_pids = [h.proc.pid for h in handles]
-        cpus = main_cpus(pids) if pids else None
-
-        def read_ticks():
-            return ticks(pids, gen_pids, cpus) if pids else None
-
-        a, ta = probe.snapshot(), read_ticks()
-        perf_text, perf_status = "", "off"
-        if opts.get("perf_counters"):
-            if not pids:
-                perf_status = "unavailable: server not local"
-            elif len(pids) > 1:
-                perf_status = "unavailable: more than one server"
-            elif not shutil.which("perf"):
-                perf_status = "unavailable: perf not installed"
-            else:
-                r = subprocess.run(
-                    ["perf", "stat", "-e", PERF_EVENTS, "-t", str(pids[0]), "--"]
-                    + ["sleep", str(window)],
-                    capture_output=True,
-                    text=True,
-                )
-                perf_text = r.stderr
-                perf_status = "ok" if r.returncode == 0 else "failed"
-        if not perf_text:
-            time.sleep(window)
-        b, tb = probe.snapshot(), read_ticks()
+        timed = probe.host is not None or any(g.executor.remote for g, _ in parts)
+        window_fn = _timed_window if timed else _local_window
+        a, b, ta, tb, pids, cpus, perf_text, perf_status = window_fn(
+            handles, parts, probe, snap, opts, window
+        )
         ended_early = [not h.alive() for h in handles]
 
         if any(g.stops_at_window_edge for g, _ in parts):
@@ -429,7 +597,7 @@ def _run_window(parts, probe, opts, expect_keys, window, settle):
                 generator.stop(handle)
             else:
                 generator.wait(handle, timeout_s=req.duration_s + 30)
-        asserts = _server_asserts(probe.clients())
+        asserts = _server_asserts(probe.clients(), probe.host)
     except BaseException:
         for (generator, _), handle in zip(parts, handles):
             generator.stop(handle)

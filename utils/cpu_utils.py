@@ -1,7 +1,7 @@
 """CPU core range parsing and allocation utilities."""
 
 import os
-from typing import List
+from typing import List, Optional
 
 
 def calculate_cpu_ranges(
@@ -88,10 +88,28 @@ def calculate_client_cpu_ranges(cfg: dict):
     )
 
 
-def validate_explicit_cpu_ranges(server_range: str, client_range: str) -> None:
-    """Validate explicit server + client CPU ranges for overlap and total."""
+def validate_explicit_cpu_ranges(
+    server_range: str, client_range: str, host_cpus: Optional[tuple] = None
+) -> None:
+    """Validate explicit server + client CPU ranges for overlap and total.
+
+    ``host_cpus`` is (server host CPUs, client host CPUs) when the server and
+    the clients run on separate hosts: each range must then fit its own host,
+    and the two may name the same CPU numbers.
+    """
     server_cores = set(parse_core_range(server_range))
     client_cores = set(parse_core_range(client_range))
+
+    if host_cpus is not None:
+        for name, cores, count in (
+            ("server_cpu_range", server_cores, host_cpus[0]),
+            ("client_cpu_range", client_cores, host_cpus[1]),
+        ):
+            if count and max(cores) >= count:
+                raise ValueError(
+                    f"{name} names CPU {max(cores)}, but its host has {count} CPUs"
+                )
+        return
 
     overlap = server_cores & client_cores
     if overlap:

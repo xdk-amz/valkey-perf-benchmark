@@ -7,7 +7,7 @@ run on a remote benchmark host through vpb_agent.py.
 import os
 import re
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 def thread_names(pid: int) -> Dict[int, str]:
@@ -101,3 +101,36 @@ def ticks(pids, gen_pids, cpus) -> dict:
             break
     t["steal"] = cpu_steal(cpus)
     return t
+
+
+def ticks_from_json(t: Optional[dict]) -> Optional[dict]:
+    """Undo JSON's string keys on a ``ticks`` result read back from a host."""
+    if t is None:
+        return None
+    out = dict(t)
+    out["main"] = {int(k): v for k, v in t["main"].items()}
+    out["sched"] = {int(k): v for k, v in t["sched"].items()}
+    out["steal"] = tuple(t["steal"]) if t.get("steal") else None
+    return out
+
+
+def pids_of_binary(binary: str) -> List[int]:
+    """Pids whose executable is ``binary``.
+
+    Matching /proc/<pid>/exe ignores command lines, so a shell or ssh session
+    whose arguments mention the binary's path is never matched.
+    """
+    want = os.path.realpath(os.path.expanduser(binary))
+    out = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            exe = os.readlink(f"/proc/{entry}/exe")
+        except OSError:
+            continue
+        if exe.endswith(" (deleted)"):
+            exe = exe[: -len(" (deleted)")]
+        if exe == want:
+            out.append(int(entry))
+    return sorted(out)

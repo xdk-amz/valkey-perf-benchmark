@@ -135,12 +135,19 @@ class CachecannonGenerator(LoadGenerator):
             lines.append("cluster = true")
         if req.tls:
             lines.append("tls = true")
+            # Valkey's test certificates (utils/gen-test-certs.sh) name
+            # localhost, not the server's address.
+            hostname = self.options.get(
+                "tls_hostname", "localhost" if req.tls_dir else None
+            )
+            if hostname:
+                lines.append(f"tls_hostname = {_toml_str(hostname)}")
             if req.tls_dir:
-                d = Path(req.tls_dir).resolve()
+                d = self.executor.path(Path(req.tls_dir).resolve())
                 lines += [
-                    f"tls_ca_file = {_toml_str(str(d / 'ca.crt'))}",
-                    f"tls_cert_file = {_toml_str(str(d / 'valkey.crt'))}",
-                    f"tls_key_file = {_toml_str(str(d / 'valkey.key'))}",
+                    f"tls_ca_file = {_toml_str(d + '/ca.crt')}",
+                    f"tls_cert_file = {_toml_str(d + '/valkey.crt')}",
+                    f"tls_key_file = {_toml_str(d + '/valkey.key')}",
                 ]
         if req.auth_password:
             if req.auth_user:
