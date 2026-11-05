@@ -51,7 +51,13 @@ pytestmark = [
 ]
 
 PORT = 16379
-MEASUREMENT = {"window": 3, "settle": 1, "max_main_runq_wait_pct": 5.0}
+# The interrupt check is off: these hosts share the test machine's interrupts.
+MEASUREMENT = {
+    "window": 3,
+    "settle": 1,
+    "max_main_runq_wait_pct": 5.0,
+    "max_main_irq_pct": None,
+}
 
 
 @pytest.fixture

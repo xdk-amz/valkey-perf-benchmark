@@ -54,6 +54,23 @@ def cpu_steal(cpus: Optional[set] = None) -> Optional[tuple]:
     return (steal, total) if found else None
 
 
+def cpu_irq(cpus: Optional[set] = None) -> Optional[tuple]:
+    """(irq + softirq, total) jiffies summed over ``cpus`` (all CPUs when None)."""
+    irq = total = 0.0
+    found = False
+    for line in Path("/proc/stat").read_text().splitlines():
+        name, *fields = line.split()
+        if not name.startswith("cpu") or name == "cpu":
+            continue
+        if cpus is not None and int(name[3:]) not in cpus:
+            continue
+        vals = [float(v) for v in fields[:8]]
+        irq += vals[5] + vals[6]
+        total += sum(vals)
+        found = True
+    return (irq, total) if found else None
+
+
 def io_thread_index(name: str) -> Optional[int]:
     m = re.match(r"io_thd_(\d+)$", name)
     return int(m.group(1)) if m else None
@@ -78,7 +95,8 @@ def ticks(pids, gen_pids, cpus) -> dict:
 
     ``main`` and ``sched`` are keyed by server pid; ``io`` sums every IO
     thread; ``gen`` sums the generator processes (None if one is gone);
-    ``steal`` is (steal, total) jiffies over ``cpus``.
+    ``steal`` is (steal, total) and ``irq`` (irq + softirq, total) jiffies
+    over ``cpus``.
     """
     t = {"main": {}, "sched": {}, "io": 0.0, "gen": 0.0}
     for pid in pids:
@@ -100,6 +118,7 @@ def ticks(pids, gen_pids, cpus) -> dict:
             t["gen"] = None
             break
     t["steal"] = cpu_steal(cpus)
+    t["irq"] = cpu_irq(cpus)
     return t
 
 
@@ -111,6 +130,7 @@ def ticks_from_json(t: Optional[dict]) -> Optional[dict]:
     out["main"] = {int(k): v for k, v in t["main"].items()}
     out["sched"] = {int(k): v for k, v in t["sched"].items()}
     out["steal"] = tuple(t["steal"]) if t.get("steal") else None
+    out["irq"] = tuple(t["irq"]) if t.get("irq") else None
     return out
 
 

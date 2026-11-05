@@ -34,6 +34,7 @@ def run(tmp_path_factory):
             "window": 2,
             "settle": 1,
             "max_main_runq_wait_pct": None,
+            "max_main_irq_pct": None,
             "max_steal_pct": None,
         },
         "generators": {"cachecannon": {"path": CACHECANNON, "threads": 1}},

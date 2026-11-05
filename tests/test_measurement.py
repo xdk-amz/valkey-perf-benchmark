@@ -224,6 +224,52 @@ class TestDisturbance:
             validate_measurement({"max_steal_pct": -1})
 
 
+class TestInterruptsOnMainCpu:
+    def test_over_limit_is_invalid(self):
+        reasons = evaluate_validity({"main_irq_pct": 18.8}, _opts(), {})
+        assert reasons == [
+            "main's CPU spent 18.8% of the window in interrupts (> 2.0%): disturbed"
+        ]
+
+    def test_under_limit_and_off(self):
+        assert evaluate_validity({"main_irq_pct": 0.4}, _opts(), {}) == []
+        opts = _opts(max_main_irq_pct=None)
+        assert evaluate_validity({"main_irq_pct": 50.0}, opts, {}) == []
+        with pytest.raises(ValueError):
+            validate_measurement({"max_main_irq_pct": -1})
+
+    def test_cpu_irq_sums_irq_and_softirq(self, tmp_path, monkeypatch):
+        import procstat
+
+        stat = (
+            "cpu  1 2 3 4 5 6 7 8 0 0\n"
+            "cpu0 10 0 10 70 0 3 7 0 0 0\n"
+            "cpu1 10 0 10 60 0 15 5 0 0 0\n"
+        )
+        real = procstat.Path
+
+        def fake(path):
+            return real(tmp_path / "stat") if str(path) == "/proc/stat" else real(path)
+
+        (tmp_path / "stat").write_text(stat)
+        monkeypatch.setattr(procstat, "Path", fake)
+        assert procstat.cpu_irq({1}) == (20.0, 100.0)
+        assert procstat.cpu_irq(None) == (30.0, 200.0)
+
+    def test_measured_only_on_main_cpus(self):
+        """With main not confined, interrupt time of the whole host says
+        nothing about main, so no figure is reported."""
+        import measurement
+
+        ta = {"main": {5: 0.0}, "sched": {}, "io": 0.0, "gen": None}
+        ta.update(steal=(0, 100), irq=(0, 100))
+        tb = {**ta, "main": {5: 100.0}, "steal": (0, 200), "irq": (50, 200)}
+        fields = measurement._cpu_fields(ta, tb, [5], None, 1.0, {})
+        assert "main_irq_pct" not in fields
+        fields = measurement._cpu_fields(ta, tb, [5], {1}, 1.0, {})
+        assert fields["main_irq_pct"] == 50.0
+
+
 class TestBusyThresholdPerVersion:
     SETTING = {"default": 98, "255.": 90, "9.0": 97, "9.0.7": 99}
 

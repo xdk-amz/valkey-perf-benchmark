@@ -74,7 +74,8 @@ def _measure(tmp_path, port):
         threads=2,
     )
     probe = ServerProbe(lambda: valkey.Valkey(port=port, decode_responses=True), True)
-    opts = {**DEFAULTS, "window": 3, "settle": 1}
+    # Interrupts on the test machine are not what these tests disturb.
+    opts = {**DEFAULTS, "window": 3, "settle": 1, "max_main_irq_pct": None}
     out = run_measured(CachecannonGenerator(CACHECANNON), req, probe, opts)
     return out["extra"], evaluate_validity(out["extra"], opts, req.scenario)
 

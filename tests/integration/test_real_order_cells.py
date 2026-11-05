@@ -27,6 +27,7 @@ def test_cells_finish_on_every_commit_before_the_next_cell(tmp_path):
             "window": 2,
             "settle": 1,
             "max_main_runq_wait_pct": None,
+            "max_main_irq_pct": None,
             "max_steal_pct": None,
         },
         "generators": {"cachecannon": {"path": CACHECANNON, "threads": 1}},

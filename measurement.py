@@ -52,6 +52,7 @@ DEFAULTS = {
     # Disturbance limits; None turns a check off.
     "max_main_runq_wait_pct": 5.0,
     "max_steal_pct": 2.0,
+    "max_main_irq_pct": 2.0,
 }
 
 
@@ -75,7 +76,7 @@ def validate_measurement(value) -> None:
     for key in ("window", "settle", "ready_timeout"):
         if key in value and (not isinstance(value[key], int) or value[key] <= 0):
             raise ValueError(f"'measurement.{key}' must be a positive integer")
-    for key in ("max_main_runq_wait_pct", "max_steal_pct"):
+    for key in ("max_main_runq_wait_pct", "max_steal_pct", "max_main_irq_pct"):
         v = value.get(key)
         if v is not None and (
             isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0
@@ -313,6 +314,13 @@ def evaluate_validity(row: dict, opts: dict, scenario: dict) -> List[str]:
     steal = row.get("steal_pct")
     if steal_cap is not None and steal is not None and steal > steal_cap:
         reasons.append(f"CPU steal {steal:.1f}% > {steal_cap}%")
+    irq_cap = opts.get("max_main_irq_pct")
+    irq = row.get("main_irq_pct")
+    if irq_cap is not None and irq is not None and irq > irq_cap:
+        reasons.append(
+            f"main's CPU spent {irq:.1f}% of the window in interrupts "
+            f"(> {irq_cap}%): disturbed"
+        )
     need = busy_threshold(opts.get("require_main_busy_pct"), row.get("server_version"))
     if need and not scenario.get("rate"):
         busy = row.get("main_busy_pct")
@@ -627,34 +635,7 @@ def _run_window(parts, probe, opts, expect_keys, window, settle):
         if len(busy) > 1:
             shared["main_busy_pct_max"] = max(busy)
     if ta and tb:
-        cpu = [(tb["main"][p] - ta["main"][p]) / CLK_TCK / span * 100 for p in pids]
-        shared["main_cpu_pct"] = min(cpu)
-        shared["io_threads_cores"] = (tb["io"] - ta["io"]) / CLK_TCK / span
-        if ta["gen"] is not None and tb["gen"] is not None:
-            shared["generator_cores"] = (tb["gen"] - ta["gen"]) / CLK_TCK / span
-        if "main_busy_pct" not in shared:
-            shared["main_busy_pct"] = shared["main_cpu_pct"]
-            shared["main_busy_source"] = "main thread cpu"
-        sched = [p for p in pids if p in ta["sched"] and p in tb["sched"]]
-        if sched:
-            shared["main_runq_wait_pct"] = max(
-                (tb["sched"][p]["wait_ns"] - ta["sched"][p]["wait_ns"])
-                / 1e9
-                / span
-                * 100
-                for p in sched
-            )
-            shared["main_nvcsw_per_s"] = max(
-                (tb["sched"][p]["nvcsw"] - ta["sched"][p]["nvcsw"]) / span
-                for p in sched
-            )
-        if ta["steal"] and tb["steal"] and tb["steal"][1] > ta["steal"][1]:
-            shared["steal_pct"] = (
-                (tb["steal"][0] - ta["steal"][0])
-                / (tb["steal"][1] - ta["steal"][1])
-                * 100
-            )
-            shared["steal_scope"] = "main cpus" if cpus else "host"
+        shared.update(_cpu_fields(ta, tb, pids, cpus, span, shared))
     if perf_text:
         shared.update(parse_perf_stat(perf_text, cmds))
 
@@ -678,6 +659,41 @@ def _run_window(parts, probe, opts, expect_keys, window, settle):
             }
         )
     return {"extra": shared, "parts": out_parts}
+
+
+def _cpu_fields(ta, tb, pids, cpus, span, shared) -> dict:
+    """Fields read from /proc at the window edges; ``shared`` already holds
+    the server's own counters (main_busy_pct when the server reports it)."""
+    out = {}
+    cpu = [(tb["main"][p] - ta["main"][p]) / CLK_TCK / span * 100 for p in pids]
+    out["main_cpu_pct"] = min(cpu)
+    out["io_threads_cores"] = (tb["io"] - ta["io"]) / CLK_TCK / span
+    if ta["gen"] is not None and tb["gen"] is not None:
+        out["generator_cores"] = (tb["gen"] - ta["gen"]) / CLK_TCK / span
+    if "main_busy_pct" not in shared:
+        out["main_busy_pct"] = out["main_cpu_pct"]
+        out["main_busy_source"] = "main thread cpu"
+    sched = [p for p in pids if p in ta["sched"] and p in tb["sched"]]
+    if sched:
+        out["main_runq_wait_pct"] = max(
+            (tb["sched"][p]["wait_ns"] - ta["sched"][p]["wait_ns"]) / 1e9 / span * 100
+            for p in sched
+        )
+        out["main_nvcsw_per_s"] = max(
+            (tb["sched"][p]["nvcsw"] - ta["sched"][p]["nvcsw"]) / span for p in sched
+        )
+    if ta["steal"] and tb["steal"] and tb["steal"][1] > ta["steal"][1]:
+        out["steal_pct"] = (
+            (tb["steal"][0] - ta["steal"][0]) / (tb["steal"][1] - ta["steal"][1]) * 100
+        )
+        out["steal_scope"] = "main cpus" if cpus else "host"
+    # Interrupt time counts only on main's own CPUs: host-wide it is the
+    # IRQ cores' normal work.
+    if cpus and ta.get("irq") and tb.get("irq") and tb["irq"][1] > ta["irq"][1]:
+        out["main_irq_pct"] = (
+            (tb["irq"][0] - ta["irq"][0]) / (tb["irq"][1] - ta["irq"][1]) * 100
+        )
+    return out
 
 
 def stamp_validity(extra: dict, opts: dict, scenario: dict) -> dict:

@@ -24,7 +24,12 @@ SHAPE = {"keyspacelen": 10000, "data_size": 32, "pipeline": 8, "clients": 8}
 def _config(port, scenarios, measurement):
     # These servers are not pinned, so the disturbance checks (tested in
     # test_real_disturbance.py) would depend on other load on the host.
-    measurement = {"max_main_runq_wait_pct": None, "max_steal_pct": None, **measurement}
+    measurement = {
+        "max_main_runq_wait_pct": None,
+        "max_steal_pct": None,
+        "max_main_irq_pct": None,
+        **measurement,
+    }
     return {
         "cluster_mode": False,
         "tls_mode": False,

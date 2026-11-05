@@ -73,6 +73,7 @@ def test_tls_rows_from_both_generators(tmp_path, measured):
             "window": 2,
             "settle": 1,
             "max_main_runq_wait_pct": None,
+            "max_main_irq_pct": None,
             "max_steal_pct": None,
         }
         if measured

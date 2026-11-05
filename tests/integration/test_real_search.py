@@ -42,6 +42,7 @@ MEASUREMENT = {
     "window": 2,
     "settle": 1,
     "max_main_runq_wait_pct": None,
+    "max_main_irq_pct": None,
     "max_steal_pct": None,
 }
 LOAD = {
