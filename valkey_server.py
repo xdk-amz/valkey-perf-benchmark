@@ -134,10 +134,20 @@ class ServerLauncher:
         self.module_path = None  # Will be set during launch
         self.cluster_nodes = []  # Track multiple node processes
 
+    def _port(self) -> int:
+        """Return the single-node server port from the config, else the default."""
+        return (getattr(self, "config", None) or {}).get("port", DEFAULT_PORT)
+
+    def _log_path(self, name: str) -> str:
+        """Return an absolute path for a server log file in the results dir."""
+        return str(Path(self.results_dir).resolve() / name)
+
     def _create_client(
-        self, tls_mode: bool, host: str = "127.0.0.1", port: int = DEFAULT_PORT
+        self, tls_mode: bool, host: str = "127.0.0.1", port: Optional[int] = None
     ) -> valkey.Valkey:
         """Return a Valkey client for server management."""
+        if port is None:
+            port = self._port()
         kwargs = {
             "host": host,
             "port": port,
@@ -312,13 +322,15 @@ class ServerLauncher:
         return cmd
 
     def _wait_for_port_available(
-        self, port: int = DEFAULT_PORT, timeout: int = 60
+        self, port: Optional[int] = None, timeout: int = 60
     ) -> None:
         """Wait until the TCP port is free (not in TIME_WAIT/LISTEN).
 
         After SIGKILL, the kernel may hold the socket in TIME_WAIT for up to 60s.
         This method blocks until the port is available for binding.
         """
+        if port is None:
+            port = self._port()
         logging.info(f"Waiting for port {port} to become available...")
         start = time.time()
         while time.time() - start < timeout:
@@ -373,7 +385,7 @@ class ServerLauncher:
         """Context manager for Valkey client connections."""
         client = None
         try:
-            client = self._create_client(tls_mode)
+            client = self._create_client(tls_mode, host=self.target_ip)
             yield client
         finally:
             if client:
@@ -390,11 +402,17 @@ class ServerLauncher:
         module_path: Optional[str] = None,
     ) -> None:
         """Start Valkey server."""
-        log_file = f"{Path.cwd()}/{self.results_dir}/valkey_log_cluster_{'enabled' if cluster_mode else 'disabled'}_tls_{'enabled' if tls_mode else 'disabled'}.log"
+        log_file = self._log_path(
+            f"valkey_log_cluster_{'enabled' if cluster_mode else 'disabled'}"
+            f"_tls_{'enabled' if tls_mode else 'disabled'}.log"
+        )
 
+        # Listen only on the address clients use (loopback by default), so a
+        # server started with protected-mode off is not reachable on every
+        # interface of the host.
         cmd = self._build_server_command(
-            port=6379,
-            bind_ip=None,
+            port=self._port(),
+            bind_ip=(self.config or {}).get("bind_ip") or self.target_ip,
             cpu_range=self.cores,
             tls_mode=tls_mode,
             cluster_mode=cluster_mode,
@@ -490,11 +508,13 @@ class ServerLauncher:
         node_id: int,
     ) -> None:
         """Launch a single cluster node."""
-        log_file = f"{Path.cwd()}/{self.results_dir}/valkey_cluster_node{node_id}_port{port}.log"
+        log_file = self._log_path(f"valkey_cluster_node{node_id}_port{port}.log")
 
+        # Without a bind_ip, listen on the target address rather than every
+        # interface; nodes run with protected-mode off.
         cmd = self._build_server_command(
             port=port,
-            bind_ip=bind_ip,
+            bind_ip=bind_ip or self.target_ip,
             cpu_range=cpu_range,
             tls_mode=tls_mode,
             cluster_mode=True,
