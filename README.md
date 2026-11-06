@@ -575,6 +575,7 @@ See `dashboards/README.md` for complete deployment guide and architecture detail
 - `configs/benchmark-configs.json`: Standard benchmark configurations
 - `configs/benchmark-configs-cluster-tls.json`: Specialized configurations for cluster and TLS testing
 - `configs/mixed-rw.json`: Mixed read/write over 4M keys of 512 B, all in memory: Zipfian (alpha 1.0) and uniform, 80/20 GET/SET. `configs/mixed-rw-smoke.json` runs the same two scenarios at small sizes in under a minute
+- `dashboards/static/`: A static per-second dashboard for one results directory, fed by `utils/dashboard_export.py`
 
 ## Development
 

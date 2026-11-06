@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Valkey Benchmarks</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5"></script>
+  <style>
+    :root { --bg:#1a1a2e;--surface:#16213e;--border:#0f3460;--text:#e4e4e4;--muted:#a0a0b0;--accent:#0ea5e9; }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+    header{display:flex;align-items:center;gap:1rem;padding:.5rem 1rem;border-bottom:1px solid var(--border);flex-shrink:0}
+    header h1{font-size:.9rem;font-weight:600}
+    header .status{margin-left:auto;font-size:.7rem;color:var(--muted)}
+    .tab-bar{display:flex;gap:.25rem;padding:.4rem 1rem;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap}
+    .tab-bar button{background:var(--surface);color:var(--muted);border:1px solid var(--border);padding:.3rem .8rem;border-radius:4px;cursor:pointer;font-size:.75rem}
+    .tab-bar button.active{color:var(--text);border-color:var(--accent)}
+    .view{display:flex;flex:1;overflow:hidden}
+    .sidebar{width:220px;flex-shrink:0;overflow-y:auto;padding:.6rem;border-right:1px solid var(--border);font-size:.72rem}
+    .sidebar h3{font-size:.7rem;color:var(--accent);margin:.6rem 0 .2rem}
+    .sidebar label{display:block;color:var(--muted);cursor:pointer;padding:1px 0}
+    .btn-row{display:flex;gap:.25rem}
+    .btn-row button{flex:1;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:3px;font-size:.68rem;padding:.2rem;cursor:pointer}
+    .main{flex:1;overflow-y:auto;padding:.8rem}
+    .desc{font-size:.75rem;color:var(--muted);margin-bottom:.5rem}
+    .datasets{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.6rem}
+    .datasets label{background:var(--surface);color:var(--text);padding:.25rem .5rem;border-radius:4px;font-size:.72rem;cursor:pointer}
+    .kpis{display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:.8rem}
+    .kpi{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:.4rem .7rem;min-width:110px}
+    .kpi .value{font-size:1.1rem;font-weight:600}
+    .kpi .label{font-size:.65rem;color:var(--muted)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:.7rem}
+    .card{display:none;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:.5rem}
+    .card.visible{display:block}
+    .card.wide{grid-column:1/-1}
+    .card h3{font-size:.72rem;color:var(--muted);margin-bottom:.3rem;font-weight:500}
+    .empty{color:var(--muted);font-size:.8rem;padding:2rem}
+  </style>
+</head>
+<body>
+<header><h1 id="title">Valkey Benchmarks</h1><span class="status" id="status">Loading...</span></header>
+<nav class="tab-bar" id="tab-bar"></nav>
+<div class="view">
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">
+    <div class="desc" id="desc"></div>
+    <div class="datasets" id="datasets"></div>
+    <div class="kpis" id="kpis"></div>
+    <div class="grid" id="grid"></div>
+  </main>
+</div>
+<script>
+// Data lives beside this page in data/ unless ?data=<url> points elsewhere,
+// for example a raw.githubusercontent.com directory of another branch.
+const params = new URLSearchParams(location.search);
+const DATA = (params.get('data') || 'data').replace(/\/$/, '');
+const PALETTE = ['#0ea5e9','#f97316','#8b5cf6','#10b981','#ef4444','#eab308','#ec4899','#14b8a6',
+                 '#a3e635','#f472b6','#60a5fa','#fb923c','#c084fc','#34d399','#fca5a5','#fcd34d'];
+
+// Metric groups of the original benchmark_dashboard view on the unstable branch.
+const GROUPS = {
+  'Throughput': ['ops_per_sec','total_commands_delta','keyspace_hits','keyspace_misses'],
+  'Memory': ['used_memory','used_memory_rss','maxmemory','mem_frag_ratio'],
+  'Tiering': ['total_num_items_spilled_to_ext_storage','total_num_items_fetched_from_ext_storage',
+              'num_items_spilling_to_ext_storage','completion_read_ok','dram_value_hits',
+              'kbc_fetching_block','disk_hit_pct','mem_hit_pct'],
+  'CPU': ['cpu_user','cpu_sys','valkey_cpu_user','valkey_cpu_sys','valkey_cpu_total','asio_cpu_pct'],
+  'Disk': ['disk_read_iops','disk_write_iops','disk_read_mb','disk_write_mb','disk_read_merges_ps',
+           'disk_write_merges_ps','disk_r_await_ms','disk_w_await_ms','disk_aqu_sz','disk_util_pct',
+           'disk_in_flight','disk_req_sz_kb'],
+  'Throttle': ['throttle_total_throttled','throttle_queued_clients','throttle_current_rate',
+               'throttle_allowed_tps','blocked_clients'],
+  'Spill Pipeline': ['spill_submitted_count','spill_serialized_count','mean_spill_ram','inflight_spill_ram_bytes'],
+  'Latency (client)': ['_client_get_latency','_client_set_latency'],
+  'Latency (server)': ['_server_latency'],
+};
+const TITLES = {
+  asio_cpu_pct: 'server worker threads cpu pct',
+  _client_get_latency: 'Client GET latency (ms), first read process',
+  _client_set_latency: 'Client SET latency (ms), first write process',
+  _server_latency: 'Server-side latency (µs), measured phase',
+};
+const BAR_METRICS = ['_client_get_latency','_client_set_latency','_server_latency'];
+const SERIES = Object.values(GROUPS).flat().filter(m => !m.startsWith('_'));
+const DEFAULT_VISIBLE = ['ops_per_sec','used_memory','valkey_cpu_total','asio_cpu_pct',
+  'disk_util_pct','total_num_items_spilled_to_ext_storage','total_num_items_fetched_from_ext_storage',
+  ...BAR_METRICS];
+const LAT_FIELDS = ['avg_latency_ms','p50_latency_ms','p95_latency_ms','p99_latency_ms','max_latency_ms'];
+const SRV_PCT = ['p50','p90','p99','p99.9'];
+
+const chartOpts = {
+  responsive:true, animation:false, interaction:{intersect:false,mode:'index'},
+  plugins:{legend:{labels:{color:'#a0a0b0',boxWidth:10,font:{size:10}}}},
+  scales:{x:{ticks:{color:'#a0a0b0',maxTicksLimit:15},grid:{color:'#0f3460'}},
+          y:{ticks:{color:'#a0a0b0'},grid:{color:'#0f3460'}}},
+};
+
+let manifest = null, tab = null, active = new Set(), visible = new Set(DEFAULT_VISIBLE);
+const cache = {}, charts = {};
+
+function setStatus(text) {
+  document.getElementById('status').textContent = text;
+  try { parent.postMessage({type:'view-status', text, cls:'ok'}, '*'); } catch (e) {}
+}
+function fetchCsv(path) {
+  return new Promise(resolve => Papa.parse(`${DATA}/${path}`, {
+    download:true, header:true, dynamicTyping:true, skipEmptyLines:true,
+    complete: r => resolve(r.data), error: () => resolve([]) }));
+}
+function fetchText(path) {
+  return fetch(`${DATA}/${path}`).then(r => r.ok ? r.text() : '').catch(() => '');
+}
+function parseServer(txt) {
+  const out = {};
+  txt.trim().split('\n').forEach(line => {
+    const m = line.match(/^latency_percentiles_usec_([^:]+):(.+)/);
+    if (!m) return;
+    const vals = {};
+    m[2].split(',').forEach(p => { const [k, v] = p.split('='); vals[k] = parseFloat(v); });
+    out[m[1]] = vals;
+  });
+  return out;
+}
+async function loadDataset(ds) {
+  if (cache[ds.name]) return cache[ds.name];
+  const [rows, get, set, srv] = await Promise.all([
+    fetchCsv(`${ds.name}.csv`), fetchCsv(`${ds.name}-get-latency.csv`),
+    fetchCsv(`${ds.name}-set-latency.csv`),
+    fetchText(`${ds.name}-server-latency.txt`)]);
+  return cache[ds.name] = {rows, get:get[0], set:set[0], server:parseServer(srv)};
+}
+function color(i) { return PALETTE[i % PALETTE.length]; }
+
+function buildSidebar() {
+  const sb = document.getElementById('sidebar');
+  sb.innerHTML = '';
+  const row = document.createElement('div'); row.className = 'btn-row';
+  [['All', () => new Set([...SERIES, ...BAR_METRICS])], ['None', () => new Set()],
+   ['Default', () => new Set(DEFAULT_VISIBLE)]].forEach(([label, fn]) => {
+    const b = document.createElement('button'); b.textContent = label;
+    b.onclick = () => { visible = fn(); buildSidebar(); updateVisibility(); };
+    row.appendChild(b);
+  });
+  sb.appendChild(row);
+  Object.entries(GROUPS).forEach(([group, fields]) => {
+    const h = document.createElement('h3'); h.textContent = group; sb.appendChild(h);
+    fields.forEach(f => {
+      const lbl = document.createElement('label');
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = visible.has(f);
+      cb.onchange = () => { cb.checked ? visible.add(f) : visible.delete(f); updateVisibility(); };
+      lbl.append(cb, ' ', (TITLES[f] || f).replace(/^_/, '').replace(/_/g, ' '));
+      sb.appendChild(lbl);
+    });
+  });
+}
+function buildGrid() {
+  const grid = document.getElementById('grid');
+  [...SERIES, ...BAR_METRICS].forEach(m => {
+    const card = document.createElement('div');
+    card.className = 'card' + (m === 'ops_per_sec' || BAR_METRICS.includes(m) ? ' wide' : '');
+    card.dataset.metric = m;
+    const h = document.createElement('h3'); h.textContent = TITLES[m] || m.replace(/_/g, ' ');
+    const canvas = document.createElement('canvas');
+    card.append(h, canvas); grid.appendChild(card);
+    charts[m] = new Chart(canvas, {type: BAR_METRICS.includes(m) ? 'bar' : 'line',
+                                   data:{labels:[], datasets:[]}, options:chartOpts});
+  });
+}
+function updateVisibility() {
+  document.querySelectorAll('#grid .card').forEach(c => c.classList.toggle('visible', visible.has(c.dataset.metric)));
+}
+
+function buildTabs() {
+  const bar = document.getElementById('tab-bar');
+  bar.innerHTML = '';
+  manifest.tabs.forEach(t => {
+    const b = document.createElement('button'); b.textContent = t.label; b.title = t.label;
+    b.classList.toggle('active', t === tab);
+    b.onclick = () => selectTab(t);
+    bar.appendChild(b);
+  });
+}
+function selectTab(t) {
+  tab = t;
+  active = new Set(t.datasets.slice(0, 6).map(d => d.name));
+  buildTabs();
+  document.getElementById('desc').textContent =
+    `${t.description || t.label} (group ${t.group}, commit ${t.datasets[0]?.commit || '?'}). x-axis: seconds since the measured phase started.`;
+  const sel = document.getElementById('datasets'); sel.innerHTML = '';
+  t.datasets.forEach((ds, i) => {
+    const lbl = document.createElement('label'); lbl.style.borderLeft = `3px solid ${color(i)}`;
+    lbl.title = ds.description || ds.name;
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = active.has(ds.name);
+    cb.onchange = () => { cb.checked ? active.add(ds.name) : active.delete(ds.name); render(); };
+    lbl.append(cb, ' ', ds.label); sel.appendChild(lbl);
+  });
+  render();
+}
+
+async function render() {
+  const chosen = tab.datasets.map((ds, i) => ({ds, color: color(i)})).filter(x => active.has(x.ds.name));
+  const loaded = await Promise.all(chosen.map(x => loadDataset(x.ds)));
+  chosen.forEach((x, i) => x.data = loaded[i]);
+
+  SERIES.forEach(m => {
+    let maxLen = 0;
+    const datasets = chosen.filter(x => x.data.rows.length).map(x => {
+      maxLen = Math.max(maxLen, x.data.rows.length);
+      return {label:x.ds.label, data:x.data.rows.map(r => r[m] ?? 0), borderColor:x.color,
+              tension:.2, pointRadius:0, borderWidth:1.5};
+    });
+    charts[m].data.labels = Array.from({length:maxLen}, (_, i) => i);
+    charts[m].data.datasets = datasets; charts[m].update();
+  });
+
+  [['_client_get_latency', 'get'], ['_client_set_latency', 'set']].forEach(([key, side]) => {
+    charts[key].data.labels = LAT_FIELDS.map(f => f.replace('_latency_ms', ''));
+    charts[key].data.datasets = chosen.filter(x => x.data[side]).map(x => ({
+      label:x.ds.label, data:LAT_FIELDS.map(f => parseFloat(x.data[side][f]) || 0),
+      backgroundColor:x.color + 'cc', borderColor:x.color, borderWidth:1}));
+    charts[key].update();
+  });
+
+
+  const cmds = [...new Set(chosen.flatMap(x => Object.keys(x.data.server)))].sort();
+  charts._server_latency.data.labels = cmds.flatMap(c => SRV_PCT.map(p => `${c} ${p}`));
+  charts._server_latency.data.datasets = chosen.map(x => ({
+    label:x.ds.label, backgroundColor:x.color + 'cc', borderColor:x.color, borderWidth:1,
+    data: cmds.flatMap(c => SRV_PCT.map(p => x.data.server[c]?.[p] || 0))}));
+  charts._server_latency.update();
+
+  // KPI: mean ops/s after the first 10% of the run (at least 1 s)
+  const kpis = document.getElementById('kpis'); kpis.innerHTML = '';
+  chosen.forEach(x => {
+    const rows = x.data.rows, skip = Math.max(1, Math.floor(rows.length / 10));
+    const steady = rows.slice(skip);
+    const avg = steady.reduce((s, r) => s + (r.ops_per_sec || 0), 0) / (steady.length || 1);
+    const k = document.createElement('div'); k.className = 'kpi';
+    const v = document.createElement('div'); v.className = 'value'; v.style.color = x.color;
+    v.textContent = `${(avg / 1000).toFixed(1)}K`;
+    const l = document.createElement('div'); l.className = 'label';
+    l.textContent = `${x.ds.label} ops/s (client total ${(x.ds.rps / 1000).toFixed(1)}K)`;
+    k.append(v, l); kpis.appendChild(k);
+  });
+  updateVisibility();
+}
+
+(async function init() {
+  try {
+    const r = await fetch(`${DATA}/manifest.json`);
+    if (!r.ok) throw new Error(`HTTP ${r.status} for ${DATA}/manifest.json`);
+    manifest = await r.json();
+  } catch (e) {
+    document.getElementById('grid').innerHTML = `<div class="empty">No data: ${e.message}</div>`;
+    setStatus('error'); return;
+  }
+  document.getElementById('title').textContent = manifest.title;
+  document.title = manifest.title;
+  buildSidebar(); buildGrid();
+  if (manifest.tabs.length) selectTab(manifest.tabs[0]);
+  setStatus(`${manifest.tabs.reduce((n, t) => n + t.datasets.length, 0)} datasets from ${manifest.source}`);
+})();
+</script>
+</body>
+</html>
