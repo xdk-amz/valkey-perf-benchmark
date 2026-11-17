@@ -4,6 +4,10 @@ name: Set Command Scenarios
 # build: any repository and ref, including a pull request head such as
 # refs/pull/4959/head or a branch in a fork.
 on:
+  # TEMPORARY: registers this workflow on the fork so workflow_dispatch can
+  # target this branch; the job is skipped on push. Removed in the next commit.
+  push:
+    branches: [set-scenarios-pr4959]
   workflow_dispatch:
     inputs:
       valkey_repo:
@@ -52,6 +56,7 @@ permissions:
 
 jobs:
   set_scenarios:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ startsWith(inputs.runner, 'ubuntu-') && inputs.runner || fromJSON(format('["self-hosted","{0}"]', inputs.runner)) }}
     timeout-minutes: 7200
     env:
