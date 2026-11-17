@@ -446,6 +446,18 @@ jobs:
           name: benchmark-results
           path: ${{ env.PERF_BENCHMARK_DIR }}/results
 
+      # Takes effect once the action is on PERF_BENCHMARK_BRANCH: this job runs
+      # the perf-benchmark checkout from that branch, not the workflow's ref.
+      - name: Build and upload static dashboard
+        if: always()
+        continue-on-error: true
+        uses: ./valkey-perf-benchmark/.github/actions/static-dashboard
+        with:
+          working-directory: ${{ env.PERF_BENCHMARK_DIR }}
+          title: Valkey Search benchmark (${{ env.MODULE_BRANCH }})
+          test-type: fts
+          fields: branch=${{ env.MODULE_BRANCH }}
+
       - name: Re-auth with AWS credentials
         if: always()
         continue-on-error: true

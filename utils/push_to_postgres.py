@@ -9,7 +9,6 @@ will automatically create new database columns.
 """
 
 import argparse
-import json
 import re
 import sys
 from datetime import datetime
@@ -20,8 +19,20 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import execute_values, Json
 
-DESCRIPTION_MAX_LENGTH = 500
-CONFIG_NAME_MAX_LENGTH = 50
+# Allow ``python utils/push_to_postgres.py`` to import utils.* modules.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from utils.metric_rows import (
+    AUTO_COLUMNS,
+    CONFIG_NAME_MAX_LENGTH,
+    DESCRIPTION_MAX_LENGTH,
+    TIMESTAMP_COLUMNS,
+    load_metrics,
+    normalize_metrics,
+    parse_timestamp,
+)
 
 
 def detect_field_type(value: Any) -> str:
@@ -242,54 +253,19 @@ def convert_metrics_to_rows(
         Tuple of (list of tuples ready for PostgreSQL insertion, number of skipped entries).
     """
     rows = []
-    skipped_count = 0
+    normalized, skipped_count = normalize_metrics(metrics_data)
 
-    for i, metric in enumerate(metrics_data):
-        # Skip entries that are None or empty
-        if not metric or not isinstance(metric, dict):
-            print(f"  Skipping entry {i+1}: invalid data")
-            skipped_count += 1
-            continue
-
-        # Skip entries missing required fields
-        if not metric.get("timestamp") or not metric.get("commit"):
-            print(f"  Skipping entry {i+1}: missing required fields")
-            skipped_count += 1
-            continue
-
+    for metric in normalized:
         row = []
         for column in column_order:
-            if column in ["id", "created_at"]:
-                # Skip auto-generated columns
+            if column in AUTO_COLUMNS:
                 continue
-            elif column in ("timestamp", "module_commit_timestamp"):
-                timestamp_str = metric.get(column, "")
-                if timestamp_str:
-                    try:
-                        timestamp_obj = datetime.fromisoformat(
-                            timestamp_str.replace("Z", "+00:00")
-                        )
-                        row.append(timestamp_obj)
-                    except:
-                        row.append(None)
-                else:
-                    row.append(None)
-            elif column in ["group_description", "scenario_description"]:
-                value = metric.get(column)
-                if isinstance(value, str) and len(value) > DESCRIPTION_MAX_LENGTH:
-                    value = value[:DESCRIPTION_MAX_LENGTH]
-                row.append(value)
-            elif column == "config_set":
-                value = metric.get(column)
-                row.append(Json(value) if value is not None else None)
-            elif column == "config_name":
-                value = metric.get(column)
-                if isinstance(value, str) and len(value) > CONFIG_NAME_MAX_LENGTH:
-                    value = value[:CONFIG_NAME_MAX_LENGTH]
-                row.append(value)
-            else:
-                # Direct field mapping since field names are now normalized
-                row.append(metric.get(column))
+            value = metric.get(column)
+            if column in TIMESTAMP_COLUMNS:
+                value = parse_timestamp(value)
+            elif column == "config_set" and value is not None:
+                value = Json(value)
+            row.append(value)
         rows.append(tuple(row))
     return rows, skipped_count
 
@@ -396,16 +372,11 @@ def process_commit_metrics(
         print(f"Skipping {commit_dir.name}: no metrics.json found")
         return 0, True
 
-    with open(metrics_file) as f:
-        metrics_data = json.load(f)
+    metrics_data = load_metrics(metrics_file, test_type)
 
     if not metrics_data:
         print(f"Skipping {commit_dir.name}: empty metrics")
         return 0, True
-
-    # Augment metrics with test_type at push time
-    for metric in metrics_data:
-        metric["test_type"] = test_type
 
     print(f"\n=== Processing {commit_dir.name} ===")
     count = push_to_postgres(metrics_data, conn, table_name, dry_run)

@@ -191,6 +191,14 @@ jobs:
           name: benchmark-results
           path: valkey-perf-benchmark/results
 
+      - name: Build and upload static dashboard
+        continue-on-error: true
+        uses: ./valkey-perf-benchmark/.github/actions/static-dashboard
+        with:
+          working-directory: valkey-perf-benchmark
+          title: Valkey continuous benchmark (${{ env.BRANCH }})
+          fields: branch=${{ env.BRANCH }}
+
       - name: Re-auth with AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:

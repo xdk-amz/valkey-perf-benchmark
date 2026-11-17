@@ -2,6 +2,87 @@
 
 AWS infrastructure for visualizing Valkey performance benchmarks using Grafana, EKS Fargate, CloudFront CDN, and RDS PostgreSQL.
 
+For a view that needs no server or database, see [Static dashboard](#static-dashboard).
+
+## Static dashboard
+
+`utils/build_static_dashboard.py` turns benchmark results into a static site
+that charts them in the browser. It reads every `metrics.json` under a results
+directory, flattens the entries into the same columns as the
+`benchmark_metrics` table (the flattening is shared with `push_to_postgres.py`
+in `utils/metric_rows.py`), and writes `data.json` and `data.csv` next to a
+copy of [`static/`](static/).
+
+```bash
+python utils/build_static_dashboard.py --results-dir results --out site
+python utils/build_static_dashboard.py --results-dir results --out site --inline
+```
+
+`--inline` also writes the data, script, style and chart library into
+`site/index.html`, so that single file opens from `file://` or in a sandboxed
+viewer. Other options: `--title`, `--set-field KEY=VALUE` (adds a column such as
+`branch=unstable` to rows that lack it), `--test-type` (as in
+`push_to_postgres.py`) and `--view QUERY` (the view the page opens with).
+
+Beyond the table columns, each row gets:
+
+| Field | Meaning |
+|---|---|
+| `parent.child` | One column per leaf of a nested object, e.g. `config_set.io-threads`; the object itself stays as JSON text, as in the JSONB column |
+| `config_hash` | 12-hex hash of the row's configuration columns; equal configs share it across commits, branches and runs |
+| `run_index` | The row's `run` field if present, else its position among rows with the same commit and `config_hash` (1-based, file order) |
+
+Numeric columns named `rps`, `server_ops_s*`, `*_ms`, `*_us`, `*_bytes`,
+`*_per_key`, `*_ops_s` or `populate_*` are measurements; everything else is a
+dimension. Identity and result fields (`commit`, `timestamp`, `branch`,
+`build`, `status`, `env_*`, `window_*`, measurements) stay out of `config_hash`.
+
+### What the page does
+
+- **Chart**: pick the metric (ops/s, server ops/s, p50/p99/p99.9 latency,
+  memory, any other measurement) and the X axis (any dimension: `clients`,
+  `pipeline`, `data_size`, `io_threads`, `commit`, `timestamp`, scenario fields,
+  or `config`, a readable label of the configuration). Colour by any dimension
+  (commit, branch, config, scenario). Runs are aggregated by median, mean, min
+  or max; "Show each run" adds the individual runs.
+- **Compare**: pick a column (commit, branch, build) and two of its values.
+  The page matches rows by `config_hash` and shows both absolute values and the
+  Δ % per config, with a ±2% band (adjustable) shaded.
+- **Table**: the filtered rows, sortable, with CSV download. The chart and
+  compare views also have a table of the numbers they plot.
+- **Filters** on any column: value sets for dimensions, min/max ranges for
+  measurements.
+- The view lives in the URL query string, so a link reproduces it.
+- Light and dark follow the system setting. The chart library, Apache ECharts
+  6.1.0, is vendored in [`static/vendor/echarts/`](static/vendor/echarts/)
+  (715 KB, 240 KB gzipped), so the page loads nothing from the network except
+  its own `data.json`.
+
+### Viewing results
+
+- **Locally**: build the site, then open `site/index.html` directly if it was
+  built with `--inline`, or serve the folder on loopback:
+  `python3 -m http.server 8000 --bind 127.0.0.1 --directory site` and open
+  `http://127.0.0.1:8000/`. Browsers refuse `fetch()` from `file://`, so a
+  non-inline page needs the server.
+- **From a workflow run**: `valkey_benchmark.yml`, `search_benchmark.yml` and
+  `static_dashboard.yml` upload the site as the `dashboard-site` artifact
+  (built with `--inline`) through the composite action
+  [`.github/actions/static-dashboard`](../.github/actions/static-dashboard/action.yml).
+  Download it with `gh run download <run-id> -n dashboard-site -D site`, then
+  open `site/index.html`. `search_benchmark.yml` checks out this repository's
+  `main` branch, so its step works once the action is merged there.
+- **On GitHub Pages**: `static_dashboard.yml` has a `deploy-pages` job that is
+  off by default. It runs only when the run's `deploy_pages` input is true and
+  the repository variable `STATIC_DASHBOARD_PAGES` is `true`, and it needs
+  Pages enabled with "GitHub Actions" as the source. A Pages site of a public
+  repository is public, so deploy only results you are willing to publish.
+
+`static_dashboard.yml` runs `benchmark.py` with `configs/dashboard-smoke.json`
+(SET and GET at pipeline 1 and 8, two runs) on `ubuntu-latest` by default, so a
+fork can try the whole path in a few minutes. Its inputs select another
+runner, config, commits and run count.
+
 ## Overview
 
 This infrastructure provides a serverless, scalable platform for benchmark visualization:

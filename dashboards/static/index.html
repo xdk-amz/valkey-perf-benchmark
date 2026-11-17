@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Valkey benchmark results</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1 id="title">Valkey benchmark results</h1>
+  <p id="summary" class="muted">Loading data…</p>
+</header>
+<main>
+  <nav class="tabs" role="tablist" aria-label="View">
+    <button type="button" role="tab" id="tab-chart" data-view="chart">Chart</button>
+    <button type="button" role="tab" id="tab-compare" data-view="compare">Compare</button>
+    <button type="button" role="tab" id="tab-table" data-view="table">Table</button>
+  </nav>
+
+  <section id="controls" aria-label="Controls">
+    <div class="row">
+      <label>Metric <select id="metric"></select></label>
+      <label class="not-compare not-table">X axis <select id="x"></select></label>
+      <label class="not-compare not-table">Colour by <select id="group"></select></label>
+      <label class="not-table">Aggregate runs <select id="agg">
+        <option value="median">median</option>
+        <option value="mean">mean</option>
+        <option value="min">min</option>
+        <option value="max">max</option>
+      </select></label>
+      <label class="check not-compare not-table"><input type="checkbox" id="points"> Show each run</label>
+      <label class="check not-table"><input type="checkbox" id="logy"> Log scale</label>
+      <label class="check table-only"><input type="checkbox" id="allcols"> All columns</label>
+    </div>
+    <div class="row compare-only">
+      <label>Compare by <select id="cmpcol"></select></label>
+      <label>Baseline A <select id="cmpa"></select></label>
+      <label>Candidate B <select id="cmpb"></select></label>
+      <label>Band ±% <input id="band" type="number" min="0" step="0.5" inputmode="decimal"></label>
+      <label>Sort <select id="sort">
+        <option value="config">by config</option>
+        <option value="delta">by Δ %</option>
+      </select></label>
+    </div>
+    <details id="filter-box">
+      <summary>Filters <span id="filter-count" class="muted"></span></summary>
+      <p class="muted hint">A value filter with nothing selected keeps every row.</p>
+      <div id="filters"></div>
+      <div class="row">
+        <label>Add a filter on <select id="add-filter"></select></label>
+        <button type="button" id="clear-filters">Clear filters</button>
+      </div>
+    </details>
+    <div class="row actions">
+      <button type="button" id="copy-link">Copy link to this view</button>
+      <button type="button" id="download-csv">Download table as CSV</button>
+      <input id="link-out" type="text" readonly hidden aria-label="Link to this view">
+      <span id="status" role="status" class="muted"></span>
+    </div>
+  </section>
+
+  <section id="view-chart" class="view" aria-label="Chart view">
+    <div id="chart" class="chart"></div>
+  </section>
+  <section id="view-compare" class="view" aria-label="Compare view" hidden>
+    <h2 class="chart-title" id="cmp-abs-title"></h2>
+    <div id="cmp-abs" class="chart"></div>
+    <h2 class="chart-title" id="cmp-delta-title"></h2>
+    <div id="cmp-delta" class="chart"></div>
+  </section>
+  <section aria-label="Table">
+    <p id="table-note" class="muted"></p>
+    <div class="table-wrap"><table id="table"></table></div>
+  </section>
+</main>
+<footer class="muted">
+  Static page from valkey-perf-benchmark <code>utils/build_static_dashboard.py</code>.
+  Charts by Apache ECharts 6.1.0 (Apache-2.0, see <code>vendor/echarts/</code>).
+</footer>
+<script id="vpb-data" type="application/json"></script>
+<script src="vendor/echarts/echarts.common.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+[
+  {
+    "requests": [50000],
+    "keyspacelen": [10000],
+    "data_sizes": [64],
+    "pipelines": [1, 8],
+    "clients": [16],
+    "commands": ["SET", "GET"],
+    "cluster_mode": false,
+    "tls_mode": false,
+    "warmup": 0,
+    "benchmark-threads": 1
+  }
+]

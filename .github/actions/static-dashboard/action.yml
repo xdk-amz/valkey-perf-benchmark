@@ -1,0 +1,69 @@
+name: Static benchmark dashboard
+description: >
+  Convert benchmark results (every metrics.json under a results directory) into
+  a static dashboard site with utils/build_static_dashboard.py and upload it as
+  an artifact. Needs Python 3.10+ on the runner; uses only the standard library.
+
+inputs:
+  results-dir:
+    description: Results directory, relative to working-directory
+    required: false
+    default: results
+  working-directory:
+    description: Checkout of valkey-perf-benchmark
+    required: false
+    default: .
+  output-dir:
+    description: Site directory, relative to working-directory
+    required: false
+    default: site
+  artifact-name:
+    description: Name of the uploaded artifact
+    required: false
+    default: dashboard-site
+  title:
+    description: Title shown on the page
+    required: false
+    default: ""
+  test-type:
+    description: test_type column value (as push_to_postgres.py --test-type)
+    required: false
+    default: core
+  fields:
+    description: KEY=VALUE pairs, one per line, added to every row (e.g. branch=unstable)
+    required: false
+    default: ""
+  inline:
+    description: Also write a single self-contained index.html (true/false)
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Build dashboard site
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        RESULTS_DIR: ${{ inputs.results-dir }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        TITLE: ${{ inputs.title }}
+        TEST_TYPE: ${{ inputs.test-type }}
+        FIELDS: ${{ inputs.fields }}
+        INLINE: ${{ inputs.inline }}
+      run: |
+        set -euo pipefail
+        args=(--results-dir "$RESULTS_DIR" --out "$OUTPUT_DIR" --test-type "$TEST_TYPE")
+        if [ -n "$TITLE" ]; then args+=(--title "$TITLE"); fi
+        if [ "$INLINE" = "true" ]; then args+=(--inline); fi
+        while IFS= read -r field; do
+          if [ -n "$field" ]; then args+=(--set-field "$field"); fi
+        done <<< "$FIELDS"
+        python utils/build_static_dashboard.py "${args[@]}"
+
+    - name: Upload dashboard site
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.working-directory }}/${{ inputs.output-dir }}
+        if-no-files-found: error
