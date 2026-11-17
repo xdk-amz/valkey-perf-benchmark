@@ -7,6 +7,11 @@ name: Static Dashboard
 # and the STATIC_DASHBOARD_PAGES repository variable say so.
 
 on:
+  # TEMPORARY: registers the workflow on this branch so it can be dispatched
+  # before it reaches the default branch. Its push run skips every job.
+  push:
+    branches: [static-dashboard]
+    paths: [.github/workflows/static_dashboard.yml]
   workflow_dispatch:
     inputs:
       runner:
@@ -44,6 +49,7 @@ defaults:
 
 jobs:
   build:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 120
     steps:
