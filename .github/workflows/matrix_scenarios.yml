@@ -1,0 +1,157 @@
+name: Matrix Scenarios
+
+# Runs a matrix config (configs/matrix/ratatoskr.json) with a chosen run
+# profile on one host over loopback: two Valkey builds, alternating per rep.
+# Rig runs with separate server and generator hosts use matrix_runner.py over
+# ssh instead; see README "Matrix scenarios".
+on:
+  workflow_dispatch:
+    inputs:
+      valkey_repo:
+        description: "Valkey repository to build both refs from (owner/name)"
+        required: false
+        default: "valkey-io/valkey"
+        type: string
+      baseline_ref:
+        description: "Baseline branch, tag, SHA or refs/pull/<n>/head"
+        required: false
+        default: "unstable"
+        type: string
+      candidate_ref:
+        description: "Candidate branch, tag, SHA or refs/pull/<n>/head"
+        required: false
+        default: "unstable"
+        type: string
+      profile:
+        description: "Run profile name under configs/matrix/profiles"
+        required: false
+        default: "smoke-loopback"
+        type: string
+      overrides:
+        description: 'JSON merged into the config, e.g. {"matrix": {"profile": {"values": {"io_threads": 4}}}}'
+        required: false
+        default: "{}"
+        type: string
+      runner:
+        description: "Self-hosted runner label, or a GitHub-hosted image such as ubuntu-latest"
+        required: false
+        default: "ubuntu-latest"
+        type: string
+
+concurrency:
+  group: ${{ startsWith(inputs.runner, 'ubuntu-') && format('matrix-scenarios-{0}', github.run_id) || inputs.runner }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: "bash -Eeuo pipefail -x {0}"
+
+permissions:
+  contents: read
+
+jobs:
+  matrix_scenarios:
+    runs-on: ${{ startsWith(inputs.runner, 'ubuntu-') && inputs.runner || fromJSON(format('["self-hosted","{0}"]', inputs.runner)) }}
+    timeout-minutes: 720
+    env:
+      HOSTED: ${{ startsWith(inputs.runner, 'ubuntu-') }}
+      VALKEY_REPO: ${{ inputs.valkey_repo }}
+      PROFILE: ${{ inputs.profile }}
+      # fromJSON rejects a malformed override before anything is built.
+      OVERRIDES: ${{ toJSON(fromJSON(inputs.overrides)) }}
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@3605726ffa6ef7750b99ff496e5b88248b414e26 # v4.9.0
+        with:
+          python-version: "3.10"
+
+      - name: Checkout Valkey Benchmark
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: valkey-perf-benchmark
+
+      - name: Resolve config
+        working-directory: valkey-perf-benchmark
+        run: |
+          mkdir -p results
+          python scripts/resolve_matrix.py \
+            --config configs/matrix/ratatoskr.json \
+            --profile "$PROFILE" \
+            --overrides "$OVERRIDES" \
+            --out results/resolved-config.json
+
+      - name: Checkout baseline
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ inputs.valkey_repo }}
+          ref: ${{ inputs.baseline_ref }}
+          path: valkey-baseline
+
+      - name: Checkout candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ inputs.valkey_repo }}
+          ref: ${{ inputs.candidate_ref }}
+          path: valkey-candidate
+
+      - name: Checkout memtier_benchmark 2.5.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: RedisLabs/memtier_benchmark
+          ref: f3ff1793d39bf19077957e986f966206eb349de7
+          path: memtier
+
+      - name: Install build dependencies
+        run: |
+          if [[ "$HOSTED" == "true" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential autoconf automake libevent-dev libssl-dev zlib1g-dev pkg-config
+          else
+            sudo dnf groupinstall "Development Tools" -y
+            sudo dnf install -y libevent-devel openssl-devel zlib-devel
+          fi
+
+      - name: Build
+        run: |
+          for b in baseline candidate; do
+            make -C "valkey-$b" -j"$(nproc)" valkey-server valkey-cli valkey-benchmark
+            echo "SHA_${b^^}=$(git -C "valkey-$b" rev-parse HEAD)" >> "$GITHUB_ENV"
+          done
+          (cd memtier && autoreconf -ivf && ./configure && make -j"$(nproc)")
+
+      - name: Run matrix scenarios
+        working-directory: valkey-perf-benchmark
+        run: |
+          python ./matrix_runner.py \
+            --config results/resolved-config.json \
+            --build "baseline=$SHA_BASELINE:$PWD/../valkey-baseline/src/valkey-server" \
+            --build "candidate=$SHA_CANDIDATE:$PWD/../valkey-candidate/src/valkey-server" \
+            --server-host local --generator-hosts local \
+            --memtier "$PWD/../memtier/memtier_benchmark" \
+            --valkey-benchmark "$PWD/../valkey-candidate/src/valkey-benchmark" \
+            --cli "$PWD/../valkey-candidate/src/valkey-cli" \
+            --results-dir results
+
+      - name: Summarize
+        if: always()
+        working-directory: valkey-perf-benchmark
+        run: |
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json, glob
+          for path in glob.glob("results/*/summary.json"):
+              s = json.load(open(path))
+              print(f"### {path}\n")
+              print("| cell | verdict | ratio | valid reps | reason |")
+              print("|---|---|---|---|---|")
+              for c in s["cells"]:
+                  v = c.get("compare") or {}
+                  valid = ", ".join(f"{b} {x['valid']}" for b, x in c["builds"].items())
+                  print(f"| {c['id']} | {v.get('verdict', '')} | {v.get('ratio', '')} | {valid} | {str(v.get('reason', ''))[:120]} |")
+          EOF
+
+      - name: Upload results and resolved config
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: matrix-scenarios-results
+          path: valkey-perf-benchmark/results

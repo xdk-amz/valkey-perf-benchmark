@@ -463,6 +463,61 @@ command and its result:
 ]
 ```
 
+### Matrix Scenarios (`matrix`)
+
+A `matrix` block describes workloads as **scenario templates** and
+**parameters**, with no values in either; a **run profile** supplies the
+values and the loader expands profile × templates into `test_groups`, one
+group per template (`configs/matrix/ratatoskr.json`, profiles in
+`configs/matrix/profiles/`).
+
+- `matrix.parameters`: each parameter's meaning, type, unit and domain
+  (`min`, `max`, `values`, `when`). Connections, pipeline depth and client
+  threads are independent; the compiler only checks that connections split
+  exactly over generator hosts × client threads.
+- `matrix.scenarios`: templates such as `HGET {key} {field}` over hashes of
+  `fields_per_hash` fields, where `field_selector` / `field_index` choose
+  the field. Each lists the template parameters it `uses`.
+- A profile's `values` apply to every template, its `scenarios` entries
+  override them per template, and any list is swept. `run` holds the
+  run-wide `reps` and the expected `instance_shapes`.
+- `generator` is a parameter (`valkey-benchmark` or `memtier`, see
+  `generators.py`). Each cell lists the generator features it needs (Zipf,
+  hot keys, random TTLs, per-request random data, one-stream read/write
+  mixes, multi-key commands in cluster mode); a cell whose generator lacks
+  one is rejected before anything runs.
+- `server_mode` is `CME` (a single node owning every slot) or `CMD`.
+
+Matrix configs run on `matrix_runner.py` (also reached through
+`benchmark.py --config <matrix config>`): one server host and one or more
+generator hosts over ssh, two or more builds (`--build label=sha:path`)
+alternating per rep with a server restart before each, and server-side
+ops/s over the window. Gates mark a rep invalid with its reason: every
+planned client connected at the window end, no generator host's CPUs above
+`max_generator_busy_pct`, error replies under `max_error_reply_pct`, no
+generator error; a run refuses to start when the median PING round trip
+exceeds `rtt_gate_ms`. A cell gets a verdict from 2 valid reps per build
+(`verdict` block); otherwise it is MISSING with the reasons.
+
+```bash
+# loopback, one host
+python matrix_runner.py --config configs/matrix/ratatoskr.json --profile smoke-loopback \
+    --build base=<sha>:../valkey-base/src/valkey-server \
+    --build cand=<sha>:../valkey-cand/src/valkey-server \
+    --memtier memtier_benchmark --cli ../valkey-cand/src/valkey-cli
+
+# a server host and a generator host (run on the generator host)
+python3 matrix_runner.py --config configs/matrix/ratatoskr.json --profile slice-iot4-p1 \
+    --build ... --server-host <ssh target> --server-bind <server private ip> \
+    --target-ip <server private ip> --generator-hosts local \
+    --server-layout 'main=1;io=2;other=67-79' --generator-cpus 16-95 ...
+```
+
+`scripts/resolve_matrix.py` writes a config with the profile inlined and
+JSON overrides merged, and prints the cell count. The `Matrix Scenarios`
+workflow (`workflow_dispatch`) takes a profile name and an overrides object
+and runs the profile over loopback on one runner.
+
 ## Results
 
 Benchmark results are stored in the `results/` directory, organized by commit ID:

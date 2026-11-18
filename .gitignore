@@ -43,3 +43,7 @@ datasets/*
 # Flamegraph scripts (downloaded on demand from GitHub) and we cache them
 scripts/stackcollapse-perf.pl
 scripts/flamegraph.pl
+
+# Matrix rig: host inventories and run logs stay local
+inventory*.json
+rig-local/

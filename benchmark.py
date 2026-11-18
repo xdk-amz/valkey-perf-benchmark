@@ -31,6 +31,8 @@ from benchmark_build import BenchmarkBuilder
 import preload
 from samplers import SOURCES
 from set_matrix import compile_set_matrix
+import config_loader
+import matrix_runner
 from utils.cpu_utils import (
     parse_core_range,
     calculate_server_cpu_ranges,
@@ -277,6 +279,14 @@ def parse_args() -> argparse.Namespace:
         help="GitHub repository in 'owner/repo' format (e.g., 'valkey-io/valkey'). "
         "Used to generate commit links in comparison reports.",
     )
+
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="Run profile for a config with a 'matrix' block: a name under "
+        "the config's profiles/ directory, or a path. Overrides the config's.",
+    )
+    matrix_runner.add_arguments(parser.add_argument_group("matrix configs"))
 
     parser.add_argument(
         "--cluster-mode-filter",
@@ -579,12 +589,19 @@ def validate_config(cfg: dict) -> None:
         compile_simple_config(cfg)
 
 
-def load_configs(path: str) -> List[dict]:
-    """Load benchmark configurations from a JSON file."""
+def load_configs(path: str, profile: Optional[str] = None) -> List[dict]:
+    """Load benchmark configurations from a JSON file.
+
+    A config with a ``matrix`` block is compiled by ``config_loader``: its run
+    profile (``profile`` overrides the config's) expands into test_groups.
+    """
     with open(path, "r") as fp:
         configs = json.load(fp)
-    for c in configs:
-        validate_config(c)
+    for i, c in enumerate(configs):
+        if "matrix" in c:
+            configs[i] = config_loader.prepare(c, path, profile)
+        else:
+            validate_config(c)
     return configs
 
 
@@ -1183,11 +1200,24 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    configs_list = load_configs(args.config)
+    configs_list = load_configs(args.config, args.profile)
 
     if not configs_list:
         print("ERROR: No configurations found in config file")
         sys.exit(1)
+
+    if any("matrix_run" in c for c in configs_list):
+        # Matrix configs run on their own runner: per-cell server settings,
+        # several generator hosts, alternating builds (--build) and gates.
+        if args.reps is None and args.runs > 1:
+            args.reps = args.runs
+        for c in configs_list:
+            if args.groups:
+                c["groups_to_run"] = set(int(g) for g in args.groups.split(","))
+            if args.scenarios:
+                c["scenario_filter"] = set(s.strip() for s in args.scenarios.split(","))
+        matrix_runner.run_configs(configs_list, args)
+        return
 
     # Use first config for initial setup
     config = configs_list[0]
