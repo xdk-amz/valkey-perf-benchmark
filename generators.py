@@ -119,12 +119,18 @@ class ValkeyBenchmark(Generator):
         cpus: Optional[str] = None,
         seed: Optional[int] = None,
         output: Optional[str] = None,
+        password: Optional[str] = None,
     ) -> List[str]:
         commands = cell["commands"]
         if len(commands) != 1:
             raise ValueError(f"{self.name} runs exactly one command per cell")
         argv = ["taskset", "-c", cpus] if cpus else []
         argv += [binary, "-h", host, "-p", str(port)]
+        if password:
+            # shortcut: valkey-benchmark takes a password only on its argv,
+            # visible to local users of the generator host; fine on a
+            # single-tenant bench host, revisit for shared ones
+            argv += ["-a", password]
         argv += ["-c", str(connections), "--threads", str(threads)]
         argv += ["-P", str(cell["pipeline"]), "-r", str(cell["keys"])]
         argv += ["--duration", str(duration)]
@@ -211,6 +217,7 @@ class Memtier(Generator):
         cpus: Optional[str] = None,
         seed: Optional[int] = None,
         output: Optional[str] = None,
+        password: Optional[str] = None,
     ) -> List[str]:
         if connections % threads:
             raise ValueError(
@@ -218,6 +225,9 @@ class Memtier(Generator):
             )
         argv = ["taskset", "-c", cpus] if cpus else []
         argv += [binary, "-s", host, "-p", str(port), "--protocol", "redis"]
+        if password:
+            # shortcut: memtier takes a password only on its argv (see above)
+            argv += ["--authenticate", password]
         argv += ["-t", str(threads), "-c", str(connections // threads)]
         argv += ["--pipeline", str(cell["pipeline"]), "--test-time", str(duration)]
         argv += ["--key-prefix", cell["key_prefix"], "--key-minimum", "1"]

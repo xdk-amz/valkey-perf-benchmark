@@ -60,7 +60,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import generators
 
-RUNNER_COMMANDS = ("info",)
+RUNNER_COMMANDS = ("info", "auth")
+PASSWORD_ENV = "VPB_MATRIX_PASSWORD"
 DEFAULT_GATES = {
     "require_all_clients": True,
     "max_generator_busy_pct": 90,
@@ -107,10 +108,14 @@ class Host:
 class Conn:
     """A minimal RESP2 client, enough for INFO, PING, CONFIG and CLUSTER."""
 
-    def __init__(self, host: str, port: int, timeout: float = 10):
+    def __init__(
+        self, host: str, port: int, timeout: float = 10, password: Optional[str] = None
+    ):
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.buf = b""
+        if password:
+            self.call("AUTH", password)
 
     def close(self):
         self.sock.close()
@@ -411,6 +416,16 @@ class Runner:
                 "--server-bind (the server's private IP) is required for a remote server"
             )
         self.target = args.target_ip
+        # Valkey's protected mode refuses every non-loopback client of a server
+        # with no password, so a remote server runs with one. It comes from the
+        # environment, reaches the server on stdin (not its argv) and is never
+        # written to results or logs.
+        self.password = os.environ.get(PASSWORD_ENV) or None
+        if not self.server.local and not self.password:
+            raise SystemExit(
+                f"a remote server needs a password in ${PASSWORD_ENV}: protected "
+                "mode refuses unauthenticated clients that are not on loopback"
+            )
         self.layout = parse_layout(args.server_layout)
         self.gen_cpus = cpu_list(args.generator_cpus)
         self.work = args.work_dir
@@ -427,6 +442,9 @@ class Runner:
         self.manifest: Dict[str, Any] = {}
 
     # ---- helpers
+    def conn(self) -> Conn:
+        return Conn(self.target, self.port, password=self.password)
+
     def wdir(self, host: Host) -> str:
         return str(self.local_work) if host.local else self.work
 
@@ -460,7 +478,8 @@ class Runner:
         w = self.wdir(self.server)
         bind = " ".join(dict.fromkeys([self.bind, "127.0.0.1"]))
         args = [
-            binary, "--port", str(self.port), "--bind", bind,
+            binary, "-",  # "-": also read config from stdin (the password)
+            "--port", str(self.port), "--bind", bind,
             "--daemonize", "yes", "--pidfile", f"{w}/server-{self.port}.pid",
             "--logfile", f"{w}/server-{self.port}.log", "--dir", w,
             "--save", "", "--appendonly", "no",
@@ -476,16 +495,17 @@ class Runner:
             + prefix
             + " ".join(shlex.quote(a) for a in args),
             timeout=30,
+            stdin=f"requirepass {self.password}\n" if self.password else "",
         )
         deadline = time.time() + 30
         while True:
             try:
-                c = Conn(self.target, self.port)
+                c = self.conn()
                 c.call("PING")
                 break
-            except (OSError, RuntimeError):
+            except (OSError, RuntimeError) as e:
                 if time.time() > deadline:
-                    raise RuntimeError("server did not answer PING within 30 s")
+                    raise RuntimeError(f"server did not answer PING within 30 s: {e}")
                 time.sleep(0.2)
         try:
             if cell["cluster_mode"]:
@@ -542,19 +562,23 @@ class Runner:
             tmp = path.with_suffix(".tmp")
             write_preload(cell["preload"], gen, tmp)
             tmp.rename(path)
+        env = dict(os.environ)
+        if self.password:  # valkey-cli reads these; nothing on its argv
+            env["VALKEYCLI_AUTH"] = env["REDISCLI_AUTH"] = self.password
         with open(path, "rb") as f:
             p = subprocess.run(
                 [self.args.cli, "-h", self.target, "-p", str(self.port), "--pipe"],
                 stdin=f,
                 capture_output=True,
                 timeout=900,
+                env=env,
             )
         out = p.stdout.decode(errors="replace")
         if p.returncode or "errors: 0" not in out:
             raise RuntimeError(
                 f"preload failed: {out[-300:]} {p.stderr.decode(errors='replace')[-300:]}"
             )
-        c = Conn(self.target, self.port)
+        c = self.conn()
         try:
             for k, v in (cell.get("server_config") or {}).items():
                 c.call("CONFIG", "SET", k, v)
@@ -565,7 +589,7 @@ class Runner:
 
     # ---- measurements
     def info(self) -> Dict[str, str]:
-        c = Conn(self.target, self.port)
+        c = self.conn()
         try:
             return parse_info(
                 c.call("INFO", "server", "clients", "stats", "commandstats")
@@ -578,10 +602,18 @@ class Runner:
         return cpu_times(out, self.gen_cpus) if rc == 0 else (0, 0)
 
     def measure_rtt(self) -> Dict[str, float]:
+        """Median PING round trip from each generator host, in ms.
+
+        The probe reads the password from its first stdin line, so it is
+        never on a command line.
+        """
         code = (
             "import socket,time,statistics,sys\n"
+            "pw=sys.stdin.readline().strip()\n"
             f"s=socket.create_connection(({self.target!r},{self.port}),timeout=5)\n"
             "s.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)\nr=[]\n"
+            "if pw:\n"
+            "  s.sendall(('*2\\r\\n$4\\r\\nAUTH\\r\\n$%d\\r\\n%s\\r\\n'%(len(pw),pw)).encode()); s.recv(64)\n"
             "for _ in range(200):\n"
             "  a=time.perf_counter(); s.sendall(b'*1\\r\\n$4\\r\\nPING\\r\\n'); s.recv(64)\n"
             "  r.append((time.perf_counter()-a)*1000)\n"
@@ -589,7 +621,14 @@ class Runner:
         )
         out = {}
         for h in self.gen_hosts:
-            out[h.target] = float(h.check("python3 -", timeout=60, stdin=code).strip())
+            script = f"{self.wdir(h)}/rtt_probe.py"
+            h.check(
+                f"mkdir -p {self.wdir(h)} && cat > {script}", timeout=30, stdin=code
+            )
+            line = (self.password or "") + "\n"
+            out[h.target] = float(
+                h.check(f"python3 {script}", timeout=60, stdin=line).strip()
+            )
         return out
 
     def host_facts(self, host: Host) -> Dict[str, str]:
@@ -647,6 +686,7 @@ class Runner:
                     cell, binary=binary_gen, host=self.target, port=self.port,
                     connections=per_host, threads=threads, duration=cell["duration"],
                     cpus=self.args.generator_cpus, output=outpath,
+                    password=self.password,
                 )  # fmt: skip
                 # timeout: the generator ends by itself even if this runner dies
                 cmd = (

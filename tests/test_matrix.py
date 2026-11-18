@@ -385,3 +385,47 @@ def test_matrix_cannot_be_combined_with_test_groups():
     cfg["matrix"]["profile"] = copy.deepcopy(tiny_profile())
     with pytest.raises(ValueError, match="cannot be combined"):
         matrix.compile_config(cfg)
+
+
+def test_password_goes_to_both_generators():
+    cells, _ = compile_with(tiny_profile(lpush={"list_length": 3}))
+    mt = generators.get("memtier").argv(
+        cells[0],
+        binary="mt",
+        host="h",
+        port=1,
+        connections=8,
+        threads=2,
+        duration=4,
+        password="pw",
+    )
+    assert mt[mt.index("--authenticate") + 1] == "pw"
+    profile = tiny_profile(lpush={"list_length": 3})
+    profile["values"].update(generator="valkey-benchmark", key_size=20)
+    cells, _ = compile_with(profile)
+    vb = generators.get("valkey-benchmark").argv(
+        cells[0],
+        binary="vb",
+        host="h",
+        port=1,
+        connections=8,
+        threads=2,
+        duration=4,
+        password="pw",
+    )
+    assert vb[vb.index("-a") + 1] == "pw"
+
+
+def test_remote_server_needs_a_password(monkeypatch, tmp_path):
+    import argparse
+
+    monkeypatch.delenv(matrix_runner.PASSWORD_ENV, raising=False)
+    _, cfg = compile_with(tiny_profile())
+    p = argparse.ArgumentParser()
+    matrix_runner.add_arguments(p)
+    args = p.parse_args(
+        ["--build", "a=1:/x", "--server-host", "srv", "--server-bind", "10.0.0.1"]
+    )
+    args.target_ip, args.results_dir = "10.0.0.1", str(tmp_path)
+    with pytest.raises(SystemExit, match="needs a password"):
+        matrix_runner.Runner(cfg, args)
