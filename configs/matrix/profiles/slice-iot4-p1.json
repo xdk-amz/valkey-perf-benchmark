@@ -1,0 +1,41 @@
+{
+  "name": "slice-iot4-p1",
+  "description": "Every scenario template once: io-threads 4, pipeline depth 1, 512 connections from one generator host, memtier, uniform keys, 128 B values, cluster mode disabled",
+  "run": {
+    "reps": 5,
+    "instance_shapes": {"server": "c8g.metal-24xl", "generator": "c8g.metal-24xl"}
+  },
+  "values": {
+    "generator": "memtier",
+    "pipeline_depth": 1,
+    "connections": 512,
+    "client_threads": 16,
+    "generator_hosts": 1,
+    "access_pattern": "uniform",
+    "keys": 100000,
+    "preload_keys": 100000,
+    "key_size": 16,
+    "value_size": 128,
+    "io_threads": 4,
+    "server_mode": "CMD",
+    "tls": false,
+    "server_config": {},
+    "run_duration": 16,
+    "window": [5, 15]
+  },
+  "scenarios": {
+    "string": {"keys": 1000000, "preload_keys": 1000000, "read_fraction": 0.8, "ttl_range": null},
+    "hset": {"fields_per_hash": 10, "field_selector": "index", "field_index": 3},
+    "hget": {"fields_per_hash": 10, "field_selector": "index", "field_index": 3},
+    "lpush": {"list_length": 10},
+    "lrange": {"list_length": 10, "range_start": 0, "range_count": 10},
+    "sadd": {"set_size": 10, "member_selector": "new"},
+    "sismember": {"set_size": 10, "member_selector": "index", "member_index": 3},
+    "zadd": {"zset_size": 10, "member_selector": "new", "score": 5},
+    "zrange": {"zset_size": 10, "range_start": 0, "range_count": 5, "withscores": true},
+    "xadd": {"stream_length": 10, "fields_per_entry": 1, "maxlen": 100},
+    "xrange": {"stream_length": 10, "fields_per_entry": 1, "xrange_count": 10},
+    "mset": {"keys": 1000000, "preload_keys": 1000000, "keys_per_call": 10},
+    "mget": {"keys": 1000000, "preload_keys": 1000000, "keys_per_call": 10}
+  }
+}
