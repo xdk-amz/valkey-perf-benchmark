@@ -1,19 +1,21 @@
 # Explorer
 
 Static views of VPB results: Single run and Compare (`TEMPLATES.md`), built
-from `vpb-result/1` files (`SCHEMA.md`). The site is plain HTML, CSS and JS
+from `vpb-result` files (`SCHEMA.md`). The site is plain HTML, CSS and JS
 with no library; the selection is in the URL.
 
 Every VPB run writes `vpb-result.json` beside its `metrics.json`:
 `benchmark.py` in `<results>/<commit>/`, `matrix_runner.py` in
-`<results>/<run>/`. The writer is `vpb_result.py` at the repo root. Its
+`<results>/<run>/`. The writer is `vpb_result.py` at the repo root; it reads the
+host, build and server facts every record carries (`SCHEMA.md`, Run facts). Its
 options on both runners:
 
 | Option | Records |
 |---|---|
 | `--data-set` | `official-ci`, `community` (default), `curated:<owner>` or `fork:<owner>/<repo>` |
 | `--ref` | the branch or tag of the commits (`benchmark.py`; defaults to a `--commits` value that is not a SHA, else the checkout's branch) |
-| `--server-instance-type` | the type of a server on another host (`benchmark.py`; a server on this host is read from the instance metadata) |
+| `--server-ssh` | the ssh target of a server on another host, so its host facts and binary are read there (`benchmark.py`; `matrix_runner.py` uses `--server-host`) |
+| `--server-instance-type` | the type of a server on another host when it cannot be read there (`benchmark.py`) |
 | `--repository` | the builds' `owner/name` |
 
 ## Views from a VPB run
@@ -25,7 +27,7 @@ python -m dashboards.explorer build results/ --out site/
 python3 -m http.server 8000 --bind 127.0.0.1 --directory site
 ```
 
-`build` takes `vpb-result/1` files, or directories it searches for them, and
+`build` takes `vpb-result` files (`/1` or `/2`), or directories it searches for them, and
 merges the runs of each cell across files. `--inline` writes `index.html` and
 `compare.html` with the data, scripts and styles inlined, for a viewer that
 serves single files with no network.
@@ -40,7 +42,7 @@ checks the schema, the fingerprints and the identifier scan, and with
 | Path | What it is |
 |---|---|
 | `cli.py` | `build`, `check` |
-| `schema.py` | the `vpb-result/1` checks |
+| `schema.py` | the `vpb-result/1` and `/2` checks |
 | `records.py` | the metrics table, the record builder and the merge of a cell's runs |
 | `fingerprint.py`, `fingerprint-fields.json` | the Benchmark Fingerprint and its field spec |
 | `site.py` | writes the site, or the inlined pages |

@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import time
 import csv
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -128,7 +129,7 @@ class ClientRunner:
         self.module_commit = module_commit
         self.module_commit_timestamp = module_commit_timestamp
         # Run facts for vpb-result.json (vpb_result.py): data_set, ref, config_path,
-        # server_local, server_cpus. None writes no vpb-result/1 file.
+        # server_local, server_type, server_ssh. None writes no vpb-result file.
         self.result_info = result_info
         self.current_profiling_set = {"enabled": False}
         self.current_config_set = {}
@@ -452,25 +453,67 @@ class ClientRunner:
             try:
                 self._write_result_records(invocations, commit_time)
             except Exception:  # metrics.json is written; the records are extra
-                logging.exception("Could not write vpb-result/1 records")
+                logging.exception("Could not write vpb-result records")
 
-    def _server_facts(self) -> dict:
-        """io-threads and CPU architecture as the server reports them, {} when it cannot be asked."""
+    def _run_facts(self, sha: str) -> dict:
+        """The host, build and setup facts of this run for vpb-result.json, read now: the server's INFO and
+        CONFIG GET, the server's host (here, or over --server-ssh) and this client host.
+        """
+        info = self.result_info
+        set_keys = list((self.config.get("custom-server-configs") or {}).keys()) + list(
+            (self.current_config_set or {}).keys()
+        )
+        server_info, config = {}, {}
         try:
             with self._client_context() as client:
-                facts = {
-                    "arch": str(client.info("server").get("os", "")).split(" ")[-1]
-                }
-                try:
-                    facts["io_threads"] = int(
-                        client.config_get("io-threads").get("io-threads")
-                    )
-                except Exception:  # CONFIG may be renamed or refused
-                    pass
-                return facts
+                server_info = {**client.info("server"), **client.info("memory")}
+                config = vpb_result.config_get(client.config_get, set_keys)
         except Exception as e:
-            logging.warning(f"Could not read server facts for vpb-result: {e}")
-            return {}
+            logging.warning(f"Could not read the server's INFO for vpb-result: {e}")
+        local = bool(info.get("server_local"))
+        ssh = info.get("server_ssh")
+        run = (
+            vpb_result.local_run if local else vpb_result.ssh_run(ssh) if ssh else None
+        )
+        server = vpb_result.server_side(
+            server_info,
+            config,
+            run=run,
+            sha=sha,
+            set_keys=set_keys,
+            peer=self.target_ip if local else None,
+            instance_type=info.get("server_type"),
+        )
+        client_host, _, client_why = vpb_result.collect_host(
+            vpb_result.local_run, pid=os.getpid(), peer=self.target_ip
+        )
+        why = {**server["why"]}
+        why.update({f"host.client.{k}": v for k, v in client_why.items()})
+        if "instance_type" in client_why:
+            why["hardware.client"] = client_why["instance_type"]
+        rc, out, _ = vpb_result.local_run(
+            f"{shlex.quote(str(self.valkey_benchmark_path))} --version", 30
+        )
+        generator = out.strip().splitlines()[0] if rc == 0 and out.strip() else None
+        if generator is None:
+            why["load_generator"] = "valkey-benchmark --version printed nothing"
+        client_cpus = (
+            self.cores or ",".join(self.client_cpu_ranges) or vpb_result.own_cpus()
+        )
+        return {
+            "server_host": server["host"],
+            "client_host": client_host,
+            "server_cpus": server["cpus"],
+            "client_cpus": client_cpus,
+            "build_info": server["build_info"],
+            "server_config": server["server_config"],
+            "load_generator": generator,
+            "network_path": vpb_result.network_path(
+                local, vpb_result.loopback(self.target_ip), self.tls_mode
+            ),
+            "io_threads": config.get("io-threads"),
+            "why": why,
+        }
 
     def _write_result_records(self, invocations: list, commit_time: str) -> None:
         """Write this run's invocations to results_dir/vpb-result.json (vpb_result.py)."""
@@ -481,12 +524,11 @@ class ClientRunner:
             or vpb_result.github_repo(self.valkey_path)
             or vpb_result.BUILD_REPO
         )
-        server = self._server_facts()
-        env = {
-            k[4:]: v
-            for k, v in invocations[0]["rows"][0].items()
-            if k.startswith("env_")
-        }
+        facts = self._run_facts(sha)
+        served = facts.pop("io_threads")
+        io_threads = self.io_threads
+        if io_threads is None and str(served).isdigit():
+            io_threads = int(served)
         rerun = []
         if not info.get("server_local"):
             rerun += ["--mode client --use-running-server --target-ip <server-ip>"]
@@ -502,19 +544,10 @@ class ClientRunner:
                 "sha": sha,
                 "time": commit_time,
             },
-            server_local=bool(info.get("server_local")),
-            server_cpus=info.get("server_cpus"),
-            io_threads=(
-                self.io_threads
-                if self.io_threads is not None
-                else server.get("io_threads")
-            ),
-            arch=server.get("arch")
-            or (self.architecture if info.get("server_local") else None),
+            io_threads=io_threads,
             config=vpb_result.config_for_rerun(self.config, info.get("config_path")),
             rerun=" ".join(rerun),
-            env=env,
-            server_type=info.get("server_type"),
+            facts=facts,
         )
         doc = vpb_result.benchmark_records(self.config, invocations, ctx)
         vpb_result.write(self.results_dir, doc)

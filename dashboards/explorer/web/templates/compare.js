@@ -250,8 +250,10 @@ function header(recs, cells) {
   const both = [...cells.values()].filter(onBoth);
   const ca = fingerprint(both.flatMap((c) => Object.values(c.a)).map((r) => unslice(r, S.a.sl)));
   const cb = fingerprint(both.flatMap((c) => Object.values(c.b)).map((r) => unslice(r, S.b.sl)));
-  const diff = fingerprintDiff(ca, cb, ["repository", "commit"]);
-  const same = ["repository", "commit", ...(S.a.sl !== S.b.sl ? [sliceOf(S.s).name] : [])];
+  // the binary and its version follow the commit; a differing slice also changes the scenario's parameters
+  const sliced = S.a.sl !== S.b.sl;
+  const diff = fingerprintDiff(ca, cb, ["repository", "commit", "build_version", "build_binary_sha256", ...(sliced ? ["scenario_parameters"] : [])]);
+  const same = ["repository", "commit", ...(sliced ? [sliceOf(S.s).name] : [])];
   const sameText = same.length > 2 ? `${same.slice(0, -1).join(", ")} and ${same[same.length - 1]}` : same.join(" and ");
   return [h("p", { class: "ids" }, `${S.s} · `, id("A", recs.a), " · ", id("B", recs.b)),
     fingerprintLine(fa, "A Benchmark Fingerprint"), fingerprintLine(fb, "B Benchmark Fingerprint"),

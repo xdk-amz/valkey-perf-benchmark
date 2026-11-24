@@ -1,10 +1,12 @@
-# Result record (`vpb-result/1`)
+# Result record (`vpb-result/2`)
 
 Every number on the explorer page is one result record: one metric of one
 build in one benchmark cell, with its runs and how to rerun it. Everything
 the explorer page shows reads only these fields. VPB writes them itself:
 `vpb_result.py` turns each run into records, in `vpb-result.json` beside the
-run's `metrics.json`.
+run's `metrics.json`. `vpb-result/1` files, which have every field below
+except those under "Run facts", stay readable: they pass `check`, and read
+together with `/2` files they take those fields as null.
 
 ## Record
 
@@ -43,6 +45,47 @@ run's `metrics.json`.
 | `runs` | list | Each run: `v` value, optional `p` pair id, `t` time, `ok` false with `why` for an invalid run. A run with no per-run value (the source keeps only the median) is absent, and `n` still counts it. |
 | `missing` | string or null | Why the cell has no value. A missing cell is never shown as zero. |
 | `reproduce` | string | Key into the data file's `reproduce` table (below). |
+
+### Run facts (`vpb-result/2`)
+
+Read at run time, the same way by every runner: the server's `INFO` and
+`CONFIG GET`, and on the server's host and the client's host one script
+(uname, `/etc/os-release`, lscpu, `/proc/cpuinfo`, `/proc/meminfo`, cgroup and
+sysfs files, the instance metadata for the instance type only), run locally or
+over ssh. A fact a host cannot report is null, and the source's `lacks` names
+each one with its reason.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `build_info.version` | string or null | Server version from `INFO server`. |
+| `build_info.settings` | object or null | Build settings from `INFO`: allocator, bits, compiler, multiplexing API, clock, git dirty flag. |
+| `build_info.args` | list or null | Make arguments, from the stamp VPB's builder leaves in the tree; null for a binary built another way. |
+| `build_info.binary_sha256` | string or null | sha256 of the running server binary, read on its host. |
+| `server_config` | object or null | `CONFIG GET` of the performance settings and every setting the run set; secrets, paths and addresses are never asked for. |
+| `load_generator` | string or null | The load generator's `--version`. |
+| `network_path` | string or null | `loopback`, `same host, non-loopback address` or `network, separate hosts`, with `, TLS` when on. |
+| `pinning` | string or null | CPUs the server and the client ran on. |
+| `parameters` | object or null | The scenario's own definition as it ran (a matrix cell's parameter point). |
+| `host.server`, `host.client` | object | The host facts below, for the server's host and the client's (several generator hosts: a value they agree on, else their values joined). |
+
+| Host fact | Meaning |
+|---|---|
+| `instance_type` | From the instance metadata (IMDSv2), else the EC2 DMI product name. |
+| `arch` | `uname -m`. |
+| `cpu_model` | lscpu model name, else the Arm part from `/proc/cpuinfo`. |
+| `cpu_microcode` | x86 microcode, else the Arm MIDR and REVIDR registers. |
+| `cpu_topology` | CPUs, sockets, cores, threads, NUMA nodes, L3. |
+| `memory` | `MemTotal`, GiB. |
+| `nic` | Driver and link speed of the interface carrying the benchmark traffic, or `loopback`. |
+| `virtualization` | `systemd-detect-virt`: VM type or `bare metal`, and any container. |
+| `cgroup_cpu_limit` | cgroup v2 `cpu.max` of the measured process, `none` when unlimited. |
+| `os` | `PRETTY_NAME` from `/etc/os-release`. |
+| `kernel` | `uname -r`. |
+| `kernel_boot_options` | `/proc/cmdline` without root devices, paths, addresses or ids. |
+| `kernel_runtime_settings` | THP and its defrag, ASLR, NUMA balancing, cpufreq governor, turbo, idle states. |
+
+No field holds a host identifier: no hostname, address, instance id, zone,
+account id or MAC.
 
 ### Cell identity
 
@@ -89,7 +132,7 @@ One JSON file per source (one data set, whole runs):
 
 ```json
 {
-  "schema": "vpb-result/1",
+  "schema": "vpb-result/2",
   "sources": [{"id": "...", "name": "...", "data_set": "...", "url": "...", "lacks": ["..."]}],
   "metrics": {"ops": {"name": "...", "unit": "ops/s", "better": "higher", "bar": [2, 20, "ns per call"]}},
   "reproduce": {"<key>": {"harness": {}, "build": {}, "config": {}, "steps": [], "setup": "", "gaps": []}},
@@ -112,6 +155,12 @@ their distinct values. Fields with no source in the record are not hashed
 and show "not recorded". `fingerprint.py` and `web/common.js` compute the
 same hash.
 
+`fingerprint-fields.json` is fingerprint v4 (`vpb-fingerprint-fields/2`). It
+gives every v3 field a source, adding the run facts above and the client
+host's instance type, CPU model, OS and kernel. Every v3 source is unchanged
+and the new ones exist only in `/2` records, so a `/1` record hashes exactly as
+it did under v3.
+
 ### Data sets in a results repository
 
 | Data set | Directory under `data/` |
@@ -123,11 +172,15 @@ same hash.
 
 ## Rules a file must pass (`python -m dashboards.explorer check`)
 
-- Every record has every field above; `value` is null exactly when `missing` is set.
+- `schema` is `vpb-result/1` or `vpb-result/2`; every record has every field
+  of its version, `host.server` and `host.client` exactly the host facts;
+  `value` is null exactly when `missing` is set.
 - `build.sha` is 40 hex; `data_set` is one of the data sets above.
 - `metric`, `reproduce` and `source` resolve.
 - `fingerprints` equals the fingerprints recomputed from the records.
 - With `--data-root`, each file sits in its data set's directory.
-- No internal identifiers anywhere: no IP addresses, instance, account,
-  security group, subnet or AMI ids, internal hostnames, internal links,
-  e-mail addresses or local paths (`idscan.py`).
+- No key anywhere (outside a rerun config) names a host identifier:
+  hostname, IP, MAC, instance id, zone, account id, serial, machine id, UUID.
+- No internal identifiers anywhere: no IP or MAC addresses, instance, account,
+  security group, subnet or AMI ids, zones, UUIDs, internal or cloud
+  hostnames, internal links, e-mail addresses or local paths (`idscan.py`).

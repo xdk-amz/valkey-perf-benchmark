@@ -1,6 +1,6 @@
 """Benchmark fingerprint: sha256 over the canonical JSON of a run's recorded fingerprint fields.
 
-The fields are in fingerprint-fields.json (vpb-fingerprint-fields/1). A field is recorded when its "source" path
+The fields are in fingerprint-fields.json (vpb-fingerprint-fields/2, fingerprint v4). A field is recorded when its "source" path
 resolves to a value in the run's records; the run's value is that value when every record agrees, else the sorted
 list of its distinct values. Canonical JSON: keys sorted, no whitespace, UTF-8. web/common.js computes the same
 hash in the page.
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 SPEC_PATH = Path(__file__).resolve().parent / "fingerprint-fields.json"
-SPEC_SCHEMA = "vpb-fingerprint-fields/1"
+SPEC_SCHEMA = "vpb-fingerprint-fields/2"
 
 
 def load_spec(path: Path = SPEC_PATH) -> List[Dict[str, Any]]:

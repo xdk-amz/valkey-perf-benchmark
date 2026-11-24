@@ -1,7 +1,8 @@
 """Identifier scan: fail when a file holds something that names a private host or account.
 
-Results go public, so a data file must hold no IP addresses, cloud resource or account ids, private hostnames,
-e-mail addresses, local home paths or key file names, and every link must point at a public host on the allowlist.
+Results go public, so a data file must hold no IP or MAC addresses, cloud resource or account ids, zones,
+UUIDs, private or cloud hostnames, e-mail addresses, local home paths or key file names, and every link must
+point at a public host on the allowlist.
 """
 
 import re
@@ -22,6 +23,17 @@ PATTERNS = {
         re.I,
     ),
     "e-mail address": re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),
+    "MAC address": re.compile(
+        r"(?<![\w:])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![\w:])", re.I
+    ),
+    "UUID": re.compile(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I
+    ),
+    "availability zone": re.compile(
+        r"\b(?:us|eu|ap|sa|ca|me|af|il|mx|cn)-(?:gov-)?(?:north|south|east|west|central|northeast|"
+        r"southeast|northwest|southwest)-\d[a-z]\b|\b[a-z]{3}\d+-az\d+\b"
+    ),
+    "public cloud hostname": re.compile(r"\bec2-\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}\b"),
     "local path": re.compile(r"(?:/home/|/Users/|/root/|/tmp/|[A-Z]:\\Users\\)"),
     "key file": re.compile(r"\b[\w-]+\.pem\b"),
 }

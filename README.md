@@ -527,14 +527,18 @@ results/
 └── <commit-id>/
     ├── logs.txt                         # Benchmark logs
     ├── metrics.json                     # Performance metrics in JSON format
-    ├── vpb-result.json                  # The same runs as vpb-result/1 records, for the explorer
+    ├── vpb-result.json                  # The same runs as vpb-result/2 records, for the explorer
     └── valkey_log_cluster_disabled.log  # Valkey server logs
 ```
 
-`vpb-result.json` holds one record per cell and metric with every run,
-the build, the harness commit and the hardware the run could read (see
-`dashboards/explorer/SCHEMA.md`). `--data-set`, `--ref` and
-`--server-instance-type` fill in what the run cannot read itself.
+`vpb-result.json` holds one record per cell and metric with every run, and
+the same facts for every scenario: the build (version, settings, make
+arguments, binary sha256), the server's settings, and the server's and
+client's host (instance type, CPU, memory, NIC, virtualization, OS, kernel and
+its settings), read at run time (see `dashboards/explorer/SCHEMA.md`).
+`--data-set` and `--ref` name the data set and branch, `--server-ssh` lets
+`benchmark.py` read a remote server's host, and `--server-instance-type`
+gives its type when that host cannot.
 `python -m dashboards.explorer build results/ --out site/` turns any
 results directory into the static Single run and Compare views.
 

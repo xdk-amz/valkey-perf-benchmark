@@ -1,4 +1,4 @@
-"""vpb-result/1 records: the metrics table, the record builder, run statistics and the merge of one cell's runs."""
+"""vpb-result records: the metrics table, the record builder, run statistics and the merge of one cell's runs."""
 
 import copy
 import hashlib
@@ -133,8 +133,11 @@ def record(
     missing: Optional[str] = None,
     value: Optional[float] = None,
     n: Optional[int] = None,
+    facts: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """One result record. ``value``/``n`` override the run statistics when the source keeps only a median."""
+    """One result record. ``value``/``n`` override the run statistics when the source keeps only a median.
+    ``facts``: the vpb-result/2 fields (host, build and run setup); without them the record is /1.
+    """
     if metric not in METRICS:
         raise ValueError(f"unknown metric {metric}")
     s = stats([r["v"] for r in runs if r.get("ok", True) and r["v"] is not None])
@@ -167,6 +170,7 @@ def record(
         "runs": runs,
         "missing": missing,
         "reproduce": reproduce,
+        **{k: copy.deepcopy(v) for k, v in (facts or {}).items()},
     }
 
 

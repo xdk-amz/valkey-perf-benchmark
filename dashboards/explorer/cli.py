@@ -1,6 +1,6 @@
-"""python -m dashboards.explorer: build the static site from vpb-result/1 files, or check them.
+"""python -m dashboards.explorer: build the static site from vpb-result files, or check them.
 
-build INPUT... --out DIR [--inline]   site from vpb-result/1 files, or directories holding them (a VPB
+build INPUT... --out DIR [--inline]   site from vpb-result files, or directories holding them (a VPB
                                       results directory: each run writes vpb-result.json beside metrics.json)
 check PATH... [--data-root DIR]       schema, fingerprints and the identifier scan; --data-root also checks
                                       that each file sits in its data set's directory (results repo layout)
@@ -25,7 +25,7 @@ def _read(f: Path) -> Any:
 
 
 def collect(inputs: List[Path]) -> List[Tuple[str, Dict[str, Any]]]:
-    """(path, document) for every vpb-result/1 file in the inputs; other files in a directory are skipped."""
+    """(path, document) for every vpb-result file in the inputs; other files in a directory are skipped."""
     docs = []
     for p in inputs:
         if p.is_dir():
@@ -36,10 +36,10 @@ def collect(inputs: List[Path]) -> List[Tuple[str, Dict[str, Any]]]:
         else:
             doc = _read(p)
             if not schema.is_result_doc(doc):
-                raise SystemExit(f"{p}: not a vpb-result/1 file")
+                raise SystemExit(f"{p}: not a vpb-result file")
             docs.append((str(p), doc))
     if not docs:
-        raise SystemExit(f"no vpb-result/1 files in {', '.join(map(str, inputs))}")
+        raise SystemExit(f"no vpb-result files in {', '.join(map(str, inputs))}")
     return docs
 
 
@@ -94,7 +94,7 @@ def main(argv=None) -> int:
         "inputs",
         nargs="+",
         type=Path,
-        help="vpb-result/1 files, or directories searched for them",
+        help="vpb-result files, or directories searched for them",
     )
     b.add_argument("--out", required=True, type=Path)
     b.add_argument(
@@ -102,7 +102,7 @@ def main(argv=None) -> int:
         action="store_true",
         help="self-contained pages with the data inlined, no data files",
     )
-    c = sub.add_parser("check", help="validate vpb-result/1 files")
+    c = sub.add_parser("check", help="validate vpb-result files")
     c.add_argument("paths", nargs="+", type=Path)
     c.add_argument(
         "--data-root",

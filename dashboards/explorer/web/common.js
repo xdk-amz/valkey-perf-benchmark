@@ -1,5 +1,5 @@
 /* Valkey benchmark results: code shared by every template (helpers, labels, data, cell parts).
-   Plain JS, no library, no network beyond the page's own data files. Every number comes from vpb-result/1
+   Plain JS, no library, no network beyond the page's own data files. Every number comes from vpb-result/1 or /2
    records (SCHEMA.md). All data is rendered as text, never as HTML. */
 "use strict";
 
@@ -111,10 +111,10 @@ async function load() {
     docs = await Promise.all(manifest.files.map(async (f) => (await fetch(`data/${f}`)).json()));
     spec = await (await fetch("fingerprint-fields.json")).json();
   }
-  if (spec.schema !== "vpb-fingerprint-fields/1") throw new Error(`unknown fingerprint spec ${spec.schema}`);
+  if (spec.schema !== "vpb-fingerprint-fields/2") throw new Error(`unknown fingerprint spec ${spec.schema}`);
   FP.fields = spec.fields;
   for (const d of docs) {
-    if (d.schema !== "vpb-result/1") throw new Error(`unknown schema ${d.schema}`);
+    if (d.schema !== "vpb-result/1" && d.schema !== "vpb-result/2") throw new Error(`unknown schema ${d.schema}`);
     Object.assign(DATA.metrics, d.metrics);
     Object.assign(DATA.reproduce, d.reproduce);
     DATA.records.push(...d.records);
@@ -317,7 +317,7 @@ function fingerprint(recs) {
   const fields = FP.fields.map((f) => {
     const vals = f.source ? [...new Set(recs.map((r) => getPath(r, f.source)).filter((v) => v != null && v !== "").map((v) => canonical(v)))] : [];
     const value = !vals.length ? undefined : vals.length === 1 ? JSON.parse(vals[0]) : vals.sort().map((v) => JSON.parse(v));
-    const partial = f.source ? [] : (f.partial_source || []).map((p) => [p, [...new Set(recs.map((r) => getPath(r, p)).filter((v) => v != null && v !== ""))]]).filter(([, v]) => v.length);
+    const partial = value !== undefined ? [] : (f.partial_source || []).map((p) => [p, [...new Set(recs.map((r) => getPath(r, p)).filter((v) => v != null && v !== ""))]]).filter(([, v]) => v.length);
     return { ...f, value, partial };
   });
   const recorded = Object.fromEntries(fields.filter((f) => f.value !== undefined).map((f) => [f.field, f.value]));

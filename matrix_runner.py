@@ -35,7 +35,7 @@ than ``1 / rtt_flag_fraction`` round trips is flagged ``rtt_bound``.
 
 Results: ``<results-dir>/<run>/metrics.json`` (rows for the static dashboard
 and ``push_to_postgres.py``), ``vpb-result.json`` (the same reps as
-vpb-result/1 records, ``vpb_result.py``), ``summary.json`` (verdicts per cell),
+vpb-result/2 records, ``vpb_result.py``), ``summary.json`` (verdicts per cell),
 ``cells.json`` and ``manifest.json``. A rerun with the same ``--run-name``
 skips reps already recorded. A file named STOP in the run directory stops
 the run between reps.
@@ -442,6 +442,8 @@ class Runner:
         )
         self.rtt_ms: Optional[float] = None
         self.manifest: Dict[str, Any] = {}
+        # build label -> vpb_result.server_build(), read once per build from its server's INFO
+        self.build_facts: Dict[str, Dict[str, Any]] = {}
 
     # ---- helpers
     def conn(self) -> Conn:
@@ -650,6 +652,22 @@ class Runner:
             "arch": lines[3] or "unknown",
         }
 
+    def server_facts(self, cell, label, sha, binary):
+        """The build (once per label) and the CONFIG GET settings of the server just started, for
+        vpb-result.json."""
+        keys = list((cell.get("server_config") or {}).keys())
+        c = self.conn()
+        try:
+            info = parse_info(c.call("INFO", "server", "memory"))
+            conf = vpb_result.config_get(lambda *k: c.call("CONFIG", "GET", *k), keys)
+        finally:
+            c.close()
+        if label not in self.build_facts:
+            self.build_facts[label] = vpb_result.server_build(
+                info, self.server.run, binary, sha
+            )
+        return self.build_facts[label], vpb_result.server_config(conf, keys)
+
     # ---- one rep
     def run_rep(self, cell, label, sha, binary, rep, slot) -> Dict[str, Any]:
         gen = generators.get(cell["generator"])
@@ -672,6 +690,12 @@ class Runner:
         try:
             row["window_pinning"] = self.start_server(binary, cell)
             row["window_keyspace"] = self.preload(cell)
+            try:
+                row["window_server_build"], row["window_server_config"] = (
+                    self.server_facts(cell, label, sha, binary)
+                )
+            except (OSError, RuntimeError) as e:
+                logging.warning(f"server facts for vpb-result: {e}")
             per_host = cell["connections"] // len(self.gen_hosts)
             threads = cell["client_threads"]
             results: Dict[str, Dict[str, Any]] = {}
@@ -789,7 +813,7 @@ class Runner:
         except (
             Exception
         ):  # noqa: BLE001 - metrics.json is written; the records are extra
-            logging.exception("Could not write vpb-result/1 records")
+            logging.exception("Could not write vpb-result/2 records")
 
     def write_records(self):
         """vpb-result.json beside metrics.json, rewritten from every row so far."""
@@ -802,12 +826,24 @@ class Runner:
             data_set=getattr(self.args, "data_set", None) or "community",
             repository=getattr(self.args, "repository", None),
             config_path=getattr(self.args, "config", None),
-            server_cores={
+            server_cpus={
                 c["id"]: (
-                    vpb_result.cpu_count(self.cpus_for(c)) if self.layout else None
+                    self.cpus_for(c)
+                    if self.layout
+                    else (self.manifest.get("vpb_hosts") or {}).get("server_cpus")
                 )
                 for c in cells
             },
+            client_cpus=self.args.generator_cpus
+            or ", ".join(
+                (self.manifest.get("vpb_hosts") or {}).get("generator_cpus") or []
+            )
+            or None,
+            network=vpb_result.network_path(
+                self.same_host(),
+                vpb_result.loopback(self.target),
+                any(c["point"].get("tls") for c in cells),
+            ),
         )
         if doc["records"]:
             vpb_result.write(self.out, doc, merge=False)
@@ -844,6 +880,10 @@ class Runner:
         _, mt, _ = self.gen_hosts[0].run(
             f"{shlex.quote(self.args.memtier)} --version 2>&1 | head -1"
         )
+        _, vb, _ = self.gen_hosts[0].run(
+            f"{shlex.quote(self.args.valkey_benchmark)} --version 2>&1 | head -1"
+        )
+        vpb_hosts = self.vpb_hosts()
         self.start_server(self.builds[0][2], cells[0])
         try:
             rtts = self.measure_rtt()
@@ -861,6 +901,8 @@ class Runner:
             "hosts": facts,
             "rtt_ms": rtts,
             "memtier": mt.strip(),
+            "valkey_benchmark": vb.strip(),
+            "vpb_hosts": vpb_hosts,
             "server_layout": self.args.server_layout,
             "generator_cpus": self.args.generator_cpus,
             "gates": self.gates,
@@ -878,6 +920,28 @@ class Runner:
         self.log(
             f"preflight ok: {facts['server']['instance_type']} server, rtt {rtts}, builds {sums}"
         )
+
+    def same_host(self) -> bool:
+        return self.server.local and all(h.local for h in self.gen_hosts)
+
+    def vpb_hosts(self) -> Dict[str, Any]:
+        """Every host's facts for vpb-result.json (vpb_result.HOST_SCRIPT, over ssh for remote hosts)."""
+        server, server_cpus, why = vpb_result.collect_host(
+            self.server.run, peer=self.target if self.same_host() else None
+        )
+        gens = [
+            vpb_result.collect_host(h.run, peer=self.target) for h in self.gen_hosts
+        ]
+        why = {f"host.server.{k}": v for k, v in why.items()}
+        for _, _, w in gens:
+            why.update({f"host.client.{k}": v for k, v in w.items()})
+        return {
+            "server": server,
+            "server_cpus": server_cpus,
+            "generators": [g[0] for g in gens],
+            "generator_cpus": [g[1] for g in gens if g[1]],
+            "why": why,
+        }
 
     def run(self) -> Dict[str, Any]:
         cells = self.cells()
@@ -1041,7 +1105,7 @@ def main() -> None:
     p.add_argument(
         "--repository",
         default=None,
-        help="owner/name the builds come from, for the vpb-result/1 records (default valkey-io/valkey)",
+        help="owner/name the builds come from, for the vpb-result/2 records (default valkey-io/valkey)",
     )
     vpb_result.add_arguments(p, ref=False)
     add_arguments(p)

@@ -288,7 +288,7 @@ def parse_args() -> argparse.Namespace:
         "the config's profiles/ directory, or a path. Overrides the config's.",
     )
     matrix_runner.add_arguments(parser.add_argument_group("matrix configs"))
-    vpb_result.add_arguments(parser.add_argument_group("vpb-result/1 records"))
+    vpb_result.add_arguments(parser.add_argument_group("vpb-result/2 records"))
 
     parser.add_argument(
         "--cluster-mode-filter",
@@ -1138,8 +1138,8 @@ def _execute_benchmark_run(
                 "config_path": getattr(args, "config", None),
                 "server_local": launcher is not None
                 or vpb_result.loopback(args.target_ip),
-                "server_cpus": launcher.cores if launcher else None,
                 "server_type": getattr(args, "server_instance_type", None),
+                "server_ssh": getattr(args, "server_ssh", None),
             },
         )
 
