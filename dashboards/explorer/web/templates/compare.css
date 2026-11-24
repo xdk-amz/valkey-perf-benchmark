@@ -1,0 +1,21 @@
+/* Compare template: the #4959 report's rows (bar band, pair dots, median diamond, change at the right) */
+:root { --inside: oklch(62% 0.01 260); --cband: oklch(91% 0.004 260); --pairdot: oklch(55% 0.01 260); }
+@media (prefers-color-scheme: dark) { :root { --inside: oklch(66% 0.01 260); --cband: oklch(30% 0.006 260); --pairdot: oklch(66% 0.01 260); } }
+.sw.inside { background: var(--inside); width: 9px; height: 9px; transform: rotate(45deg); }
+.sw.cband { background: var(--cband); width: 22px; }
+.sw.pairdot { background: var(--pairdot); width: 6px; height: 6px; border-radius: 50%; }
+.legend .sw.worse, .legend .sw.better { width: 9px; height: 9px; transform: rotate(45deg); }
+svg.dots .cband { fill: var(--cband); }
+svg.dots .pair { fill: var(--pairdot); fill-opacity: 0.65; }
+svg.dots .med { stroke: var(--paper); stroke-width: 1; }
+svg.dots .med.slower { fill: var(--worse); } svg.dots .med.faster { fill: var(--better); } svg.dots .med.pass { fill: var(--inside); }
+svg.dots .val { font-size: 10.5px; }
+svg.dots .val.slower { fill: var(--worse); font-weight: 600; } svg.dots .val.faster { fill: var(--better); font-weight: 600; }
+svg.dots .val.pass { fill: var(--mute); }
+td.v-slower { color: var(--worse); font-weight: 600; } td.v-faster { color: var(--better); font-weight: 600; }
+table.coverage caption { text-align: left; font-weight: 600; margin: var(--s4) 0 var(--s1); }
+.sides { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 30rem), 1fr)); gap: var(--s5); margin-top: var(--s4); }
+.side { min-width: 0; }
+td.v-pass { color: var(--mute); }
+table.tally tr.total th, table.tally tr.total td { font-weight: 650; border-bottom: 1px solid var(--mute); }
+.control input[type=number] { border: 1px solid var(--ink-2); background: var(--paper); padding: 4px 8px; border-radius: 2px; width: 7rem; font-size: var(--step-0); }

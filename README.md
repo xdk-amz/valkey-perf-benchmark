@@ -527,8 +527,16 @@ results/
 └── <commit-id>/
     ├── logs.txt                         # Benchmark logs
     ├── metrics.json                     # Performance metrics in JSON format
+    ├── vpb-result.json                  # The same runs as vpb-result/1 records, for the explorer
     └── valkey_log_cluster_disabled.log  # Valkey server logs
 ```
+
+`vpb-result.json` holds one record per cell and metric with every run,
+the build, the harness commit and the hardware the run could read (see
+`dashboards/explorer/SCHEMA.md`). `--data-set`, `--ref` and
+`--server-instance-type` fill in what the run cannot read itself.
+`python -m dashboards.explorer build results/ --out site/` turns any
+results directory into the static Single run and Compare views.
 
 Sample metrics.json
 
@@ -619,6 +627,9 @@ The project includes a complete AWS infrastructure for visualizing benchmark res
 - **Application Load Balancer** - Secured for CloudFront-only access
 
 See `dashboards/README.md` for complete deployment guide and architecture details.
+
+`dashboards/explorer` builds static views (Single run, Compare) from the
+`vpb-result.json` files the runs write; see `dashboards/explorer/README.md`.
 
 ## Utilities
 

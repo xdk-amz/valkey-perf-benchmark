@@ -33,6 +33,7 @@ from samplers import SOURCES
 from set_matrix import compile_set_matrix
 import config_loader
 import matrix_runner
+import vpb_result
 from utils.cpu_utils import (
     parse_core_range,
     calculate_server_cpu_ranges,
@@ -287,6 +288,7 @@ def parse_args() -> argparse.Namespace:
         "the config's profiles/ directory, or a path. Overrides the config's.",
     )
     matrix_runner.add_arguments(parser.add_argument_group("matrix configs"))
+    vpb_result.add_arguments(parser.add_argument_group("vpb-result/1 records"))
 
     parser.add_argument(
         "--cluster-mode-filter",
@@ -1130,6 +1132,15 @@ def _execute_benchmark_run(
             config_name=config_name,
             module_commit=module_commit,
             module_commit_timestamp=module_commit_timestamp,
+            result_info={
+                "data_set": getattr(args, "data_set", "community"),
+                "ref": getattr(args, "ref", None),
+                "config_path": getattr(args, "config", None),
+                "server_local": launcher is not None
+                or vpb_result.loopback(args.target_ip),
+                "server_cpus": launcher.cores if launcher else None,
+                "server_type": getattr(args, "server_instance_type", None),
+            },
         )
 
         runner.current_profiling_set = exec_config["profiling_set"]

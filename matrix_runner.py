@@ -34,7 +34,8 @@ rep the median PING round trip from every generator host must be at most
 than ``1 / rtt_flag_fraction`` round trips is flagged ``rtt_bound``.
 
 Results: ``<results-dir>/<run>/metrics.json`` (rows for the static dashboard
-and ``push_to_postgres.py``), ``summary.json`` (verdicts per cell),
+and ``push_to_postgres.py``), ``vpb-result.json`` (the same reps as
+vpb-result/1 records, ``vpb_result.py``), ``summary.json`` (verdicts per cell),
 ``cells.json`` and ``manifest.json``. A rerun with the same ``--run-name``
 skips reps already recorded. A file named STOP in the run directory stops
 the run between reps.
@@ -59,6 +60,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import generators
+import vpb_result
 
 RUNNER_COMMANDS = ("info", "auth")
 PASSWORD_ENV = "VPB_MATRIX_PASSWORD"
@@ -637,14 +639,15 @@ class Runner:
             "-H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null); "
             'it=$(curl -s -m 2 -H "X-aws-ec2-metadata-token: $t" '
             "http://169.254.169.254/latest/meta-data/instance-type 2>/dev/null); "
-            'echo "${it:-unknown}"; uname -r; nproc'
+            'echo "${it:-unknown}"; uname -r; nproc; uname -m'
         )
         rc, out, _ = host.run(script, timeout=20)
-        lines = (out.splitlines() + ["unknown", "unknown", "0"])[:3]
+        lines = (out.splitlines() + ["unknown", "unknown", "0", "unknown"])[:4]
         return {
             "instance_type": lines[0] or "unknown",
             "kernel": lines[1],
             "cpus": lines[2],
+            "arch": lines[3] or "unknown",
         }
 
     # ---- one rep
@@ -781,6 +784,33 @@ class Runner:
         tmp = self.rows_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.rows, indent=1) + "\n")
         tmp.rename(self.rows_path)
+        try:
+            self.write_records()
+        except (
+            Exception
+        ):  # noqa: BLE001 - metrics.json is written; the records are extra
+            logging.exception("Could not write vpb-result/1 records")
+
+    def write_records(self):
+        """vpb-result.json beside metrics.json, rewritten from every row so far."""
+        cells = self.cells()
+        doc = vpb_result.matrix_records(
+            self.cfg,
+            cells,
+            self.rows,
+            self.manifest,
+            data_set=getattr(self.args, "data_set", None) or "community",
+            repository=getattr(self.args, "repository", None),
+            config_path=getattr(self.args, "config", None),
+            server_cores={
+                c["id"]: (
+                    vpb_result.cpu_count(self.cpus_for(c)) if self.layout else None
+                )
+                for c in cells
+            },
+        )
+        if doc["records"]:
+            vpb_result.write(self.out, doc, merge=False)
 
     def done(self, cell_id, label, rep) -> bool:
         return any(
@@ -1008,6 +1038,12 @@ def main() -> None:
     p.add_argument("--target-ip", default="127.0.0.1")
     p.add_argument("--results-dir", default="results")
     p.add_argument("--scenarios", default=None, help="comma-separated cell ids")
+    p.add_argument(
+        "--repository",
+        default=None,
+        help="owner/name the builds come from, for the vpb-result/1 records (default valkey-io/valkey)",
+    )
+    vpb_result.add_arguments(p, ref=False)
     add_arguments(p)
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")

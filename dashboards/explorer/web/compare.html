@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valkey benchmark results: compare</title>
+<base target="_blank">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="templates/compare.css">
+</head>
+<body>
+<header class="masthead">
+  <div class="title">
+    <h1 id="top">Valkey benchmark results: compare</h1>
+    <span class="meta" id="meta">loading data</span>
+    <nav class="views" aria-label="Views"><a href="index.html" target="_self">Single run</a> · <a href="compare.html" target="_self" aria-current="page">Compare</a></nav>
+  </div>
+  <div class="selectors" role="group" aria-label="Runs">
+    <label class="control"><span>Scenario</span><select id="sel-scenario"></select></label>
+    <label class="control"><span>A branch</span><select id="sel-a-branch"></select></label>
+    <label class="control"><span>A commit</span><select id="sel-a-commit"></select></label>
+    <label class="control"><span>A slice</span><select id="sel-a-slice"></select></label>
+    <label class="control"><span>B branch</span><select id="sel-b-branch"></select></label>
+    <label class="control"><span>B commit</span><select id="sel-b-commit"></select></label>
+    <label class="control"><span>B slice</span><select id="sel-b-slice"></select></label>
+    <label class="control"><span>Bar (%)</span><input type="number" id="bar-rel" min="0" step="0.5"></label>
+    <label class="control"><span>Bar (ns per call)</span><input type="number" id="bar-abs" min="0" step="5"></label>
+  </div>
+</header>
+<main>
+  <div id="out"></div>
+</main>
+<aside class="drawer" id="drawer" role="dialog" aria-label="Benchmark Fingerprint fields" hidden></aside>
+<script src="common.js"></script>
+<script src="templates/compare.js"></script>
+</body>
+</html>

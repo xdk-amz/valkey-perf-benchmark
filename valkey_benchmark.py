@@ -23,6 +23,7 @@ from samplers import DEFAULT_SOURCES
 from utils.git_utils import resolve_ref, get_commit_timestamp
 from utils.cpu_utils import format_core_list, parse_core_range
 from environment_metadata import collect_environment_metadata
+import vpb_result
 
 # Constants
 VALKEY_BENCHMARK = "src/valkey-benchmark"
@@ -106,6 +107,7 @@ class ClientRunner:
         config_name: Optional[str] = None,
         module_commit: Optional[str] = None,
         module_commit_timestamp: Optional[str] = None,
+        result_info: Optional[dict] = None,
     ) -> None:
         self.commit_id = commit_id
         self.config = config
@@ -125,6 +127,9 @@ class ClientRunner:
         self.config_name = config_name
         self.module_commit = module_commit
         self.module_commit_timestamp = module_commit_timestamp
+        # Run facts for vpb-result.json (vpb_result.py): data_set, ref, config_path,
+        # server_local, server_cpus. None writes no vpb-result/1 file.
+        self.result_info = result_info
         self.current_profiling_set = {"enabled": False}
         self.current_config_set = {}
         self.config_suffix = "default"
@@ -418,7 +423,9 @@ class ClientRunner:
         ) = self._setup_profiling_and_metrics(self.current_profiling_set, commit_time)
 
         metric_json = []
+        invocations = []
         for scenario_data in self._iterate_test_groups_scenarios():
+            started = vpb_result.now()
             result = self._run_single_scenario(
                 scenario_data["scenario"],
                 scenario_data["group_id"],
@@ -429,12 +436,88 @@ class ClientRunner:
                 scenario_data.get("group_description"),
             )
             if result:
-                if isinstance(result, list):
-                    metric_json.extend(result)
-                else:
-                    metric_json.append(result)
+                rows = result if isinstance(result, list) else [result]
+                metric_json.extend(rows)
+                invocations.append(
+                    {
+                        "scenario": scenario_data["scenario"],
+                        "group": scenario_data["group_id"],
+                        "rows": rows,
+                        "time": started,
+                    }
+                )
 
         self._finalize_metrics(metrics_processor, metric_json, profiling_enabled)
+        if self.result_info and invocations:
+            try:
+                self._write_result_records(invocations, commit_time)
+            except Exception:  # metrics.json is written; the records are extra
+                logging.exception("Could not write vpb-result/1 records")
+
+    def _server_facts(self) -> dict:
+        """io-threads and CPU architecture as the server reports them, {} when it cannot be asked."""
+        try:
+            with self._client_context() as client:
+                facts = {
+                    "arch": str(client.info("server").get("os", "")).split(" ")[-1]
+                }
+                try:
+                    facts["io_threads"] = int(
+                        client.config_get("io-threads").get("io-threads")
+                    )
+                except Exception:  # CONFIG may be renamed or refused
+                    pass
+                return facts
+        except Exception as e:
+            logging.warning(f"Could not read server facts for vpb-result: {e}")
+            return {}
+
+    def _write_result_records(self, invocations: list, commit_time: str) -> None:
+        """Write this run's invocations to results_dir/vpb-result.json (vpb_result.py)."""
+        info = self.result_info
+        sha = resolve_ref(self.commit_id, self.valkey_path)
+        repository = (
+            self.repository
+            or vpb_result.github_repo(self.valkey_path)
+            or vpb_result.BUILD_REPO
+        )
+        server = self._server_facts()
+        env = {
+            k[4:]: v
+            for k, v in invocations[0]["rows"][0].items()
+            if k.startswith("env_")
+        }
+        rerun = []
+        if not info.get("server_local"):
+            rerun += ["--mode client --use-running-server --target-ip <server-ip>"]
+        if self.module_commit:
+            rerun += ["--module <module> --module-path <module .so>"]
+        ctx = vpb_result.run_context(
+            data_set=info.get("data_set") or "community",
+            build={
+                "repo": repository,
+                "ref": vpb_result.build_ref(
+                    self.commit_id, info.get("ref"), self.valkey_path
+                ),
+                "sha": sha,
+                "time": commit_time,
+            },
+            server_local=bool(info.get("server_local")),
+            server_cpus=info.get("server_cpus"),
+            io_threads=(
+                self.io_threads
+                if self.io_threads is not None
+                else server.get("io_threads")
+            ),
+            arch=server.get("arch")
+            or (self.architecture if info.get("server_local") else None),
+            config=vpb_result.config_for_rerun(self.config, info.get("config_path")),
+            rerun=" ".join(rerun),
+            env=env,
+            server_type=info.get("server_type"),
+        )
+        doc = vpb_result.benchmark_records(self.config, invocations, ctx)
+        vpb_result.write(self.results_dir, doc)
 
     def _get_effective_runs(self) -> int:
         """Return one run while profiling, otherwise the configured count."""
