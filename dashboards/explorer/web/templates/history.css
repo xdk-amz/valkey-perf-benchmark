@@ -1,0 +1,20 @@
+/* History: one graph per command, a point per run */
+svg.history { display: block; overflow: visible; }
+svg.history .grid { stroke: var(--hair); stroke-width: 1; }
+svg.history .axis { stroke: var(--ink-2); stroke-width: 1; }
+svg.history .tick, svg.history .lab, svg.history .atitle { fill: var(--mute); font-size: 10px; }
+svg.history .atitle { fill: var(--ink-2); }
+svg.history .series { fill: none; stroke-width: 1.4; opacity: 0.75; }
+svg.history .range { stroke-width: 1.6; opacity: 0.6; }
+svg.history .pt { cursor: pointer; outline: none; }
+svg.history .hit { fill: transparent; }
+svg.history .pt:hover .dot, svg.history .pt:focus .dot { r: 4.6; stroke: var(--ink); stroke-width: 1; }
+.panel .nodata { color: var(--mute); margin: var(--s4) 0; }
+.skey { display: flex; flex-wrap: wrap; gap: 2px var(--s3); margin: var(--s1) 0 0; font-size: var(--step--1); color: var(--ink-2); }
+.skey .sw { display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; border-radius: 2px; }
+.tip { position: fixed; z-index: 30; background: var(--paper); border: 1px solid var(--ink-2); padding: var(--s1) var(--s2);
+  font-size: var(--step--1); pointer-events: none; box-shadow: 0 2px 8px oklch(0% 0 0 / 0.12); }
+.tip caption { text-align: left; font-weight: 600; padding-bottom: 2px; }
+.tip th { text-align: left; font-weight: 400; color: var(--mute); padding: 0 var(--s3) 0 0; }
+.tip td { text-align: right; padding: 0; }
+.fprun { margin-bottom: var(--s3); }

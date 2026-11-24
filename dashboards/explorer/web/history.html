@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valkey benchmark results: history</title>
+<base target="_blank">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="templates/history.css">
+</head>
+<body>
+<header class="masthead">
+  <div class="title">
+    <h1 id="top">Valkey benchmark results: history</h1>
+    <span class="meta" id="meta">loading data</span>
+    <nav class="views" aria-label="Views"><a href="index.html" target="_self">Single run</a> · <a href="compare.html" target="_self">Compare</a> · <a href="history.html" target="_self" aria-current="page">History</a></nav>
+  </div>
+  <div class="selectors" role="group" aria-label="Branch and scenario">
+    <label class="control"><span>Branch</span><select id="sel-branch"></select></label>
+    <label class="control"><span>Scenario</span><select id="sel-scenario"></select></label>
+  </div>
+</header>
+<main>
+  <div id="out"></div>
+</main>
+<div class="tip" id="tip" role="tooltip" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-label="Benchmark Fingerprint fields" hidden></aside>
+<script src="common.js"></script><script src="templates/history.js"></script>
+</body>
+</html>

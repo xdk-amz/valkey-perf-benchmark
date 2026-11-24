@@ -1,6 +1,6 @@
 # Explorer
 
-Static views of VPB results: Single run and Compare (`TEMPLATES.md`), built
+Static views of VPB results: Single run, Compare and History (`TEMPLATES.md`), built
 from `vpb-result` run files (`SCHEMA.md`), one file per run. The site is plain
 HTML, CSS and JS with no library; the selection is in the URL.
 
@@ -28,7 +28,7 @@ python3 -m http.server 8000 --bind 127.0.0.1 --directory site
 ```
 
 `build` takes run files, or directories it searches for them. `--inline`
-writes `index.html` and `compare.html` with the data, scripts and styles
+writes `index.html`, `compare.html` and `history.html` with the data, scripts and styles
 inlined, for a viewer that serves single files with no network. `--metrics`
 names the metric definitions (default `metrics.json` here).
 

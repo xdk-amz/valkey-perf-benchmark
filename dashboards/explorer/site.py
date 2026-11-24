@@ -12,7 +12,7 @@ from . import idscan
 from .fingerprint import SPEC_PATH
 
 WEB = Path(__file__).resolve().parent / "web"
-PAGES = ("index.html", "compare.html")
+PAGES = ("index.html", "compare.html", "history.html")
 NAV = re.compile(r'\s*<nav class="views"[^>]*>.*?</nav>', re.S)
 
 

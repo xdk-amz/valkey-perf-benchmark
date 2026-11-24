@@ -205,8 +205,10 @@ def test_build_writes_one_data_file_per_run(tmp_path):
     for f in (
         "index.html",
         "compare.html",
+        "history.html",
         "common.js",
         "templates/compare.js",
+        "templates/history.js",
         "fingerprint-fields.json",
         "metrics.json",
     ):
@@ -222,7 +224,11 @@ def test_build_inline_writes_self_contained_pages(tmp_path):
         cli.main(["build", str(unzip(CI1, tmp_path)), "--out", str(out), "--inline"])
         == 0
     )
-    assert sorted(p.name for p in out.iterdir()) == ["compare.html", "index.html"]
+    assert sorted(p.name for p in out.iterdir()) == [
+        "compare.html",
+        "history.html",
+        "index.html",
+    ]
     page = (out / "compare.html").read_text()
     assert "<script src=" not in page and '<link rel="stylesheet"' not in page
     assert (
@@ -532,3 +538,153 @@ def test_single_run_tabs():
     )  # the fixture keeps server_ops only
     assert got["ci99"]["measured"] == 12 and got["bad"]["tab"] == "tps"
     assert all(g["roundTrip"] for g in got.values()) and "m=p99" in got["ci99"]["hash"]
+
+
+# ---------- History ----------
+UNSTABLE, PR_BRANCH = "valkey-io/valkey:unstable", "xdk-amz/valkey:set-member-ttl"
+
+
+def other_commit(doc, run_id, sha, time, started, factor):
+    """A copy of a run as if made on another commit: its build, times and ops scaled."""
+    d = scaled(doc, run_id, {"ops": factor})
+    d["run"]["build"].update(sha=sha, time=time)
+    d["run"]["started"] = started
+    return schema.finish(d)
+
+
+@node
+def test_history_pickers_and_url_round_trip():
+    q = {
+        "default": "",
+        "sets": f"#b={PR_BRANCH}&s=set+commands&m=p99",
+        "ci": f"#b={UNSTABLE}&s=continuous&m=tps",
+        "bad": "#b=nope:x&s=nope&m=qps",
+        "wrongscenario": f"#b={PR_BRANCH}&s=continuous",
+    }
+    got = harness("history", q, BASE, PR, CI1, CI9)
+    assert got["default"]["branches"] == [UNSTABLE, PR_BRANCH]  # most runs first
+    assert got["ci"]["scenarios"] == ["set commands", "continuous"] and got["sets"][
+        "scenarios"
+    ] == ["set commands"]
+    assert (got["bad"]["b"], got["bad"]["s"], got["bad"]["tab"]) == (
+        UNSTABLE,
+        "set commands",
+        "tps",
+    )
+    assert (got["wrongscenario"]["b"], got["wrongscenario"]["s"]) == (
+        PR_BRANCH,
+        "set commands",
+    )
+    for name, g in got.items():
+        assert g["roundTrip"], name
+    assert (
+        got["sets"]["hash"]
+        == "#b=xdk-amz%2Fvalkey%3Aset-member-ttl&s=set+commands&m=p99"
+    )
+
+
+@node
+def test_history_tabs_switch_the_metric():
+    q = {t: f"#b={UNSTABLE}&s=continuous&m={t}" for t in ("tps", "p50", "p99", "mem")}
+    got = harness("history", q, CI1, CI9)
+    assert {t: g["m"] for t, g in got.items()} == {
+        "tps": "ops",
+        "p50": "p50_ms",
+        "p99": "p99_ms",
+        "mem": "bytes_per_key",
+    }
+    first = {
+        t: g["graphs"][0]["series"][0]["points"][0][1]
+        for t, g in got.items()
+        if t != "mem"
+    }
+    assert len(set(first.values())) == 3
+    want = {c["id"]: c["metrics"]["p50_ms"]["median"] for c in load(CI1)["cells"]}
+    p = got["p50"]["graphs"][0]["series"][0]["points"][0]
+    assert p[1] in want.values() and p[5] == CI1_ID
+
+
+@node
+def test_history_has_a_graph_per_command_and_slice():
+    got = harness(
+        "history",
+        {"ci": f"#b={UNSTABLE}&s=continuous", "sets": f"#b={PR_BRANCH}&s=set+commands"},
+        BASE,
+        PR,
+        CI1,
+        CI9,
+    )
+    ci = got["ci"]["graphs"]
+    assert [g["title"] for g in ci] == [
+        "GET · pipeline 1",
+        "GET · pipeline 10",
+        "SET · pipeline 1",
+        "SET · pipeline 10",
+    ]
+    pr = load(PR)
+    sets = got["sets"]["graphs"]
+    assert len(sets) == len({c["command"] for c in pr["cells"]})
+    assert sets[0]["title"] == "SADD, existing member"
+    sadd = {c["id"] for c in pr["cells"] if c["command"] == "sadd_existing"}
+    assert sum(len(s["points"]) for s in sets[0]["series"]) == len(
+        sadd
+    )  # every cell of the command, one series each
+    assert "listpack 16 · none" in [s["label"] for s in sets[0]["series"]]
+
+
+@node
+def test_history_splits_runs_of_one_commit_by_fingerprint():
+    got = harness("history", {"ci": f"#b={UNSTABLE}&s=continuous"}, CI1, CI9)["ci"]
+    assert got["split"] == ["io_threads"] and got["commits"] == [
+        ["6c11c7fb2", load(CI1)["run"]["build"]["time"]]
+    ]
+    labels = [s["label"] for s in got["graphs"][0]["series"]]
+    assert labels == ["string · 16 B · io-threads 1", "string · 16 B · io-threads 9", "string · 128 B · io-threads 1",
+                      "string · 128 B · io-threads 9", "string · 2048 B · io-threads 1", "string · 2048 B · io-threads 9"]  # fmt: skip
+    one = got["graphs"][0]["series"][0]["points"][0]
+    nine = got["graphs"][0]["series"][1]["points"][0]
+    assert (
+        one[5] == CI1_ID and nine[5] == CI9_ID and one[1] != nine[1]
+    )  # never averaged
+
+
+@node
+def test_history_orders_commits_by_commit_time(tmp_path):
+    ci = load(CI1)
+    # run order and commit order disagree: the axis follows the commit time
+    a = other_commit(
+        ci, "r-late", "a" * 40, "2026-11-21T10:00:00+00:00", "2026-11-21T12:00:00Z", 1.1
+    )
+    b = other_commit(
+        ci,
+        "r-early",
+        "b" * 40,
+        "2026-11-10T10:00:00+00:00",
+        "2026-11-22T12:00:00Z",
+        0.9,
+    )
+    c = other_commit(
+        ci, "r-mid", "c" * 40, "2026-11-15T10:00:00+02:00", "2026-11-23T12:00:00Z", 1.0
+    )
+    got = harness(
+        "history", {"h": f"#b={UNSTABLE}&s=continuous"}, *write(tmp_path, a, b, c)
+    )["h"]
+    assert [x[0] for x in got["commits"]] == ["bbbbbbbbb", "ccccccccc", "aaaaaaaaa"]
+    assert got["split"] == []  # one run per commit: no split, no setup in the labels
+    s = got["graphs"][0]["series"][0]
+    assert s["label"] == "string · 16 B" and [p[0] for p in s["points"]] == [
+        "bbbbbbbbb",
+        "ccccccccc",
+        "aaaaaaaaa",
+    ]
+
+
+@node
+def test_history_shows_no_data_per_graph():
+    got = harness("history", {"mem": f"#b={UNSTABLE}&s=continuous&m=mem", "p50": f"#b={PR_BRANCH}&s=set+commands&m=p50",
+                              "tps": f"#b={PR_BRANCH}&s=set+commands&m=tps"}, BASE, PR, CI1, CI9)  # fmt: skip
+    assert got["mem"]["graphs"] and not any(g["hasData"] for g in got["mem"]["graphs"])
+    assert not any(
+        g["hasData"] for g in got["p50"]["graphs"]
+    )  # the fixture keeps server_ops only
+    assert all(g["hasData"] for g in got["tps"]["graphs"])

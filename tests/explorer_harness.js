@@ -1,6 +1,6 @@
 // Runs the explorer's own template code (web/common.js plus one template) in node, with no DOM, over vpb-result
 // run files, and prints what the template computes as JSON. Used by tests/test_explorer.py.
-// usage: node explorer_harness.js compare|single-run <query JSON> <run file>...
+// usage: node explorer_harness.js compare|single-run|history <query JSON> <run file>...
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -60,7 +60,22 @@ const SINGLE = `(async () => {
   }
   return JSON.stringify(out);
 })()`;
-run(template === "compare" ? COMPARE : SINGLE, "query").then((s) => process.stdout.write(s)).catch((e) => {
+const HISTORY = `(async () => {
+  const out = {};
+  for (const [name, hash] of Object.entries(__query)) {
+    S = parseHash(hash);
+    const docs = await Promise.all(runsInView().map((r) => getRun(r.id)));
+    const model = historyOf(docs, tabMetric(S.m, docs));
+    out[name] = { b: S.b, s: S.s, tab: S.m, m: model.metric, hash: toHash(S),
+      roundTrip: JSON.stringify(parseHash(toHash(S))) === JSON.stringify(S),
+      branches: branchesAll(), scenarios: scenariosOn(S.b), split: model.split,
+      commits: model.commits.map((b) => [b.sha.slice(0, 9), b.time]),
+      graphs: model.graphs.map((g) => ({ title: g.title, hasData: g.hasData,
+        series: g.series.map((s) => ({ label: s.label, points: s.points.map((p) => [p.sha.slice(0, 9), p.value, p.min, p.max, p.reps, p.run]) })) })) };
+  }
+  return JSON.stringify(out);
+})()`;
+run({ compare: COMPARE, history: HISTORY }[template] || SINGLE, "query").then((s) => process.stdout.write(s)).catch((e) => {
   console.error(e.stack || e);
   process.exit(1);
 });
