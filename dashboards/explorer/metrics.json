@@ -1,0 +1,85 @@
+{
+ "schema": "vpb-metrics",
+ "metrics": {
+  "ops": {
+   "name": "Throughput, as the client counts it",
+   "unit": "ops/s",
+   "better": "higher",
+   "bar": [
+    2,
+    20,
+    "ns per call"
+   ]
+  },
+  "server_ops": {
+   "name": "Throughput, as the server counts it",
+   "unit": "ops/s",
+   "better": "higher",
+   "bar": [
+    2,
+    20,
+    "ns per call"
+   ]
+  },
+  "avg_ms": {
+   "name": "Average latency",
+   "unit": "ms",
+   "better": "lower",
+   "bar": [
+    2,
+    0.01,
+    "ms"
+   ]
+  },
+  "p50_ms": {
+   "name": "p50 latency",
+   "unit": "ms",
+   "better": "lower",
+   "bar": [
+    2,
+    0.01,
+    "ms"
+   ]
+  },
+  "p95_ms": {
+   "name": "p95 latency",
+   "unit": "ms",
+   "better": "lower",
+   "bar": [
+    2,
+    0.01,
+    "ms"
+   ]
+  },
+  "p99_ms": {
+   "name": "p99 latency",
+   "unit": "ms",
+   "better": "lower",
+   "bar": [
+    2,
+    0.01,
+    "ms"
+   ]
+  },
+  "p999_ms": {
+   "name": "p99.9 latency",
+   "unit": "ms",
+   "better": "lower",
+   "bar": [
+    2,
+    0.01,
+    "ms"
+   ]
+  },
+  "bytes_per_key": {
+   "name": "Memory per key after the preload",
+   "unit": "B",
+   "better": "lower",
+   "bar": [
+    1,
+    16,
+    "B"
+   ]
+  }
+ }
+}

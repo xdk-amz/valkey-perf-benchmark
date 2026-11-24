@@ -1,6 +1,6 @@
 /* Valkey benchmark results: code shared by every template (helpers, labels, data, cell parts).
-   Plain JS, no library, no network beyond the page's own data files. Every number comes from vpb-result/1 or /2
-   records (SCHEMA.md). All data is rendered as text, never as HTML. */
+   Plain JS, no library, no network beyond the page's own data files. Every number comes from vpb-result
+   run files (SCHEMA.md). All data is rendered as text, never as HTML. */
 "use strict";
 
 // ---------- small helpers ----------
@@ -8,7 +8,6 @@ const median = (xs) => { const s = [...xs].sort((a, b) => a - b); const m = s.le
 const ok = (r) => r.ok !== false && r.v != null;
 const fnv = (s) => { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return (h >>> 0).toString(16).padStart(8, "0"); };
 const human = (n) => n >= 1e6 && n % 1e6 === 0 ? `${n / 1e6}M` : n >= 1e3 && n % 1e3 === 0 ? `${n / 1e3}k` : String(n);
-const sha9 = (r) => r.build.sha.slice(0, 9);
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -63,13 +62,10 @@ const mixOrder = (a, b) => { const i = MIX_ORDER.indexOf(a), j = MIX_ORDER.index
 // throughput first, then latency, then memory; client ops/s only when the server-side rate is absent
 const METRIC_ORDER = ["server_ops", "ops", "p50_ms", "p99_ms", "p999_ms", "bytes_per_key"];
 // fields that can vary inside one run besides command, shape and mix; they extend the row label
+// (io-threads, cores and hardware are run-level, in the run's fingerprint)
 const ROW_DIMS = [
-  ["pipeline", "pipeline", (r) => r.pipeline],
-  ["clients", "clients", (r) => r.clients],
-  ["io_threads", "io-threads", (r) => r.io_threads ?? "not recorded"],
-  ["workload", "", (r) => r.workload],
-  ["server", "server", (r) => r.hardware.server || "not recorded"],
-  ["cores", "cores", (r) => r.hardware.cores ?? "not recorded"],
+  ["pipeline", "pipeline", (c) => c.pipeline],
+  ["clients", "clients", (c) => c.clients],
 ];
 
 function compact(v, unit) {
@@ -98,53 +94,86 @@ function fmtv(v, unit) {
 }
 
 // ---------- data ----------
-const DATA = { records: [], metrics: {}, reproduce: {} };
+// The site holds one vpb-result file per run (SCHEMA.md) and data/manifest.json listing them; a page loads only
+// the runs it shows. With --inline every run is in the page.
+const DATA = { metrics: {}, runs: [], files: new Map() };
+
+function manifestEntry(doc) {
+  const run = doc.run, fp = run.fingerprint;
+  return { id: run.id, file: `${run.id}.json`, data_set: run.data_set, families: [...new Set(doc.cells.map((c) => c.family))].sort(),
+    mixes: [...new Set(doc.cells.map((c) => c.mix))].sort(), build: run.build, started: run.started, cells: doc.cells.length,
+    fingerprint: { hash: fp.hash, io_threads: fp.io_threads, cores: fp.cores, server: fp.server.instance_type,
+      client: fp.client.instance_type, network_path: fp.network_path } };
+}
 
 async function load() {
-  const inline = [...document.querySelectorAll("script.vpb-data")];
-  let docs, spec;
+  const inline = [...document.querySelectorAll("script.vpb-run")];
+  let spec;
   if (inline.length) {
-    docs = inline.map((s) => JSON.parse(s.textContent));
+    for (const s of inline) {
+      const d = JSON.parse(s.textContent);
+      DATA.files.set(d.run.id, Promise.resolve(d));
+      DATA.runs.push(manifestEntry(d));
+    }
+    DATA.metrics = JSON.parse(document.getElementById("vpb-metrics").textContent).metrics;
     spec = JSON.parse(document.getElementById("vpb-fingerprint-fields").textContent);
   } else {
-    const manifest = await (await fetch("data/manifest.json")).json();
-    docs = await Promise.all(manifest.files.map(async (f) => (await fetch(`data/${f}`)).json()));
+    const [manifest, metrics] = await Promise.all([fetch("data/manifest.json"), fetch("metrics.json")].map(async (p) => (await p).json()));
+    DATA.runs = manifest.runs;
+    DATA.metrics = metrics.metrics;
     spec = await (await fetch("fingerprint-fields.json")).json();
   }
-  if (spec.schema !== "vpb-fingerprint-fields/2") throw new Error(`unknown fingerprint spec ${spec.schema}`);
+  if (spec.schema !== "vpb-fingerprint-fields/3") throw new Error(`unknown fingerprint spec ${spec.schema}`);
   FP.fields = spec.fields;
-  for (const d of docs) {
-    if (d.schema !== "vpb-result/1" && d.schema !== "vpb-result/2") throw new Error(`unknown schema ${d.schema}`);
-    Object.assign(DATA.metrics, d.metrics);
-    Object.assign(DATA.reproduce, d.reproduce);
-    DATA.records.push(...d.records);
-  }
 }
 
-// scenario -> branch -> commit, each list ordered for the selectors
-function catalogue() {
-  const sc = new Map();
-  for (const r of DATA.records) {
-    if (!sc.has(r.family)) sc.set(r.family, new Map());
-    const br = sc.get(r.family);
-    if (!br.has(r.build.ref)) br.set(r.build.ref, new Map());
-    br.get(r.build.ref).set(sha9(r), r.build);
+// one run file, fetched once
+function getRun(id) {
+  if (!DATA.files.has(id)) {
+    const e = DATA.runs.find((r) => r.id === id);
+    DATA.files.set(id, fetch(`data/${e.file}`).then((r) => r.json()).then((d) => {
+      if (d.schema !== "vpb-result") throw new Error(`${e.file}: unknown schema ${d.schema}`);
+      return d;
+    }));
   }
-  return sc;
+  return DATA.files.get(id);
 }
-let CAT = null;
-const scenarios = () => [...CAT.keys()].sort((a, b) => (a === "set commands" ? -1 : b === "set commands" ? 1 : a.localeCompare(b)));
-// newest first; commit times carry their own zone offsets, so compare them as instants
-const when = (b) => Date.parse(b.time || "") || 0;
-const branches = (s) => [...CAT.get(s).keys()].sort((a, b) => when(latest(s, b)) - when(latest(s, a)) || a.localeCompare(b));
-const commits = (s, b) => [...CAT.get(s).get(b).entries()].sort((x, y) => when(y[1]) - when(x[1])).map(([k]) => k);
-const latest = (s, b) => CAT.get(s).get(b).get(commits(s, b)[0]);
+
+// newest first; times carry their own zone offsets, so compare them as instants
+const when = (t) => Date.parse(t || "") || 0;
+const newest = (a, b) => when(b.started) - when(a.started) || when(b.build.time) - when(a.build.time) || a.id.localeCompare(b.id);
+const families = () => [...new Set(DATA.runs.flatMap((r) => r.families))].sort((a, b) => (a === "set commands" ? -1 : b === "set commands" ? 1 : a.localeCompare(b)));
+const runsOf = (f) => DATA.runs.filter((r) => !f || r.families.includes(f)).sort(newest);
+const entry = (id) => DATA.runs.find((r) => r.id === id);
+// a run's label: branch, commit, start, plus the setup facts that tell it apart from runs of the same commit
+function runLabel(e) {
+  const base = `${e.build.ref} · ${e.build.sha.slice(0, 9)}${e.started ? ` · ${e.started.slice(0, 10)}` : ""}`;
+  const twins = DATA.runs.filter((r) => r.build.sha === e.build.sha && r.id !== e.id && r.families.join() === e.families.join());
+  if (!twins.length) return base;
+  const keys = [["io_threads", "io-threads"], ["cores", "cores"], ["server", "server"], ["client", "client"], ["network_path", ""]];
+  const diff = keys.filter(([k]) => twins.some((t) => t.fingerprint[k] !== e.fingerprint[k])).map(([k, n]) => `${n} ${e.fingerprint[k] ?? "not recorded"}`.trim());
+  return `${base} · ${diff.length ? diff.join(", ") : e.fingerprint.hash.slice(0, 8)}`;
+}
 function jump(e) {
   e.preventDefault();
   const id = e.currentTarget.getAttribute("href").slice(1);
   const el = document.getElementById(id);
   if (el) el.scrollIntoView();
 }
+
+// The view of one cell: per metric its summary and the reps' values, the shape the panels and verdicts read.
+function cellView(cell) {
+  const by = {};
+  const names = new Set([...Object.keys(cell.metrics), ...cell.runs.flatMap((r) => Object.keys(r).filter((k) => !REP_KEYS.has(k)))]);
+  for (const m of names) {
+    const s = cell.metrics[m];
+    const runs = cell.runs.filter((r) => m in r).map((r) => ({ v: r[m], p: r.pair, t: r.t, ok: r.ok, why: r.why, rep: r.rep }));
+    by[m] = { metric: m, value: s ? s.median : null, n: runs.filter((x) => ok(x)).length,
+      spread: s ? { min: s.min, max: s.max, cv: s.cv } : null, runs, missing: s ? null : cell.missing || "not measured" };
+  }
+  return by;
+}
+const REP_KEYS = new Set(["rep", "pair", "t", "ok", "why"]);
 
 // ---------- panels ----------
 // Set commands in the scenario's own order, with their written names.
@@ -220,56 +249,43 @@ function niceTicks(lo, hi, n) {
   return out;
 }
 
+// every rep of a cell with each metric's value
 function runsTable(cell, ms) {
-  const len = Math.max(...ms.map((m) => cell.by[m].runs.length));
-  if (!len) return h("p", { class: "note" }, "No per-run values in the source.");
-  const aligned = ms.every((m) => [0, len].includes(cell.by[m].runs.length));
-  const first = cell.by[ms.find((m) => cell.by[m].runs.length)];
-  const rows = [];
-  for (let i = 0; i < len; i++) {
-    const notes = new Set();
-    const tds = ms.map((m) => {
-      const r = cell.by[m].runs[i];
-      if (r && !ok(r)) notes.add(`invalid: ${r.why}`);
-      return h("td", { class: "num" }, r ? (r.v == null ? "" : compact(r.v, DATA.metrics[m].unit)) : "");
-    });
-    rows.push(h("tr", {}, h("th", { scope: "row" }, i + 1), h("td", {}, first.runs[i].p || ""), tds, h("td", {}, [...notes].join("; "))));
-  }
-  return h("details", { open: len <= 12, style: "margin-top: 16px" }, h("summary", {}, `Runs (${len})`),
+  const reps = cell.runs;
+  if (!reps.length) return h("p", { class: "note" }, "No reps.");
+  const rows = reps.map((r) => h("tr", {}, h("th", { scope: "row" }, r.rep), h("td", {}, r.pair || ""),
+    ms.map((m) => h("td", { class: "num" }, r[m] == null ? "" : compact(r[m], DATA.metrics[m].unit))),
+    h("td", {}, r.ok ? "" : `invalid: ${r.why}`)));
+  return h("details", { open: reps.length <= 12, style: "margin-top: 16px" }, h("summary", {}, `Reps (${reps.length})`),
     h("div", { class: "scroll" }, h("table", {},
-      h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Run"), h("th", { scope: "col" }, "Pair"),
+      h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Rep"), h("th", { scope: "col" }, "Pair"),
         ms.map((m) => h("th", { scope: "col", class: "num" }, mlabel(m))), h("th", { scope: "col" }, "Note"))),
-      h("tbody", {}, rows))),
-    null);
+      h("tbody", {}, rows))));
 }
 
-function reproBlock(block, rec) {
-  if (!block) return null;
+// how to rerun a run: its harness, build and config, and the one command
+function reproBlock(run) {
   const status = h("span", { class: "status", role: "status" });
-  const cfg = block.config.inline ? JSON.stringify(block.config.inline, null, 2)
-    : `${block.config.path}\noverrides: ${JSON.stringify(block.config.overrides)}`;
-  const steps = block.steps.join("\n");
-  const pre = h("pre", {}, steps || "No rerun command was published with this result.");
+  const hs = run.harness, b = run.build;
+  const cmd = run.reproduce || "";
+  const pre = h("pre", {}, cmd || "No rerun command was recorded with this run.");
   const copy = h("button", { type: "button", class: "copy", onclick: async () => {
-    try { await navigator.clipboard.writeText(steps); status.textContent = " copied"; }
+    try { await navigator.clipboard.writeText(cmd); status.textContent = " copied"; }
     catch { const sel = getSelection(), rg = document.createRange(); rg.selectNodeContents(pre); sel.removeAllRanges(); sel.addRange(rg); status.textContent = " selected: press Ctrl+C or \u2318C"; }
-  } }, "Copy the steps");
+  } }, "Copy the command");
   return h("div", { class: "repro" },
     h("dl", { class: "kv" },
-      h("dt", {}, "Harness"), h("dd", {}, h("a", { href: block.harness.repo }, block.harness.repo.replace("https://github.com/", "")), ` at ${block.harness.sha}`),
-      h("dt", {}, "Build"), h("dd", {}, h("a", { href: block.build.repo }, block.build.repo.replace("https://github.com/", "")), ` at ${block.build.sha} (${rec.build.ref})`),
-      h("dt", {}, "Setup"), h("dd", {}, block.setup),
-      block.provenance && [h("dt", {}, "Source"), h("dd", {}, h("a", { href: block.provenance }, block.provenance))],
-      block.gaps && block.gaps.length && [h("dt", {}, "Not recorded"), h("dd", {}, h("ul", {}, block.gaps.map((g) => h("li", {}, g))))]),
-    h("div", { class: "note" }, "Steps"), pre, steps && copy, status,
-    h("div", { class: "note" }, "Config"), h("pre", {}, cfg));
+      h("dt", {}, "Harness"), h("dd", {}, h("a", { href: `https://github.com/${hs.repo}` }, hs.repo), ` at ${hs.sha || "not recorded"}`),
+      h("dt", {}, "Build"), h("dd", {}, h("a", { href: `https://github.com/${b.repo}` }, b.repo), ` at ${b.sha} (${b.ref})`),
+      h("dt", {}, "Config"), h("dd", {}, hs.config || "inline, below")),
+    h("div", { class: "note" }, "Command"), pre, cmd && copy, status,
+    hs.config_inline ? [h("div", { class: "note" }, "Config"), h("pre", {}, JSON.stringify(hs.config_inline, null, 2))] : null);
 }
 
 // ---------- benchmark fingerprint ----------
-// Field spec: fingerprint-fields.json (vpb-fingerprint-fields/1). A field is recorded when its "source" path
-// resolves to a value in the run's records. The run's value of a field is that value when every record agrees,
-// else the sorted list of its distinct values. The fingerprint is sha256 over the canonical JSON of the recorded
-// fields only (keys sorted, no whitespace, UTF-8).
+// Field spec: fingerprint-fields.json (vpb-fingerprint-fields/3, fingerprint v5): every field and its path in the
+// run. The run file carries the hash (sha256 over the canonical JSON of {field: value}); a null field is not
+// recorded.
 const FP = { fields: [] };
 const getPath = (r, path) => path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), r);
 function canonical(v) {
@@ -277,52 +293,9 @@ function canonical(v) {
   if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
   return JSON.stringify(v);
 }
-function sha256(text) {
-  const K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
-    0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70,
-    0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
-  const H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-  const bytes = new TextEncoder().encode(text);
-  const len = Math.ceil((bytes.length + 9) / 64) * 64;
-  const m = new Uint8Array(len);
-  m.set(bytes);
-  m[bytes.length] = 0x80;
-  const bits = bytes.length * 8;
-  const dv = new DataView(m.buffer);
-  dv.setUint32(len - 8, Math.floor(bits / 2 ** 32));
-  dv.setUint32(len - 4, bits >>> 0);
-  const w = new Uint32Array(64);
-  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
-  for (let o = 0; o < len; o += 64) {
-    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(o + i * 4);
-    for (let i = 16; i < 64; i++) {
-      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
-      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
-      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
-    }
-    let [a, b, c, d, e, f, g, hh] = H;
-    for (let i = 0; i < 64; i++) {
-      const t1 = (hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) >>> 0;
-      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
-      hh = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
-    }
-    [a, b, c, d, e, f, g, hh].forEach((x, i) => { H[i] = (H[i] + x) >>> 0; });
-  }
-  return H.map((x) => x.toString(16).padStart(8, "0")).join("");
-}
-function fingerprint(recs) {
-  const fields = FP.fields.map((f) => {
-    const vals = f.source ? [...new Set(recs.map((r) => getPath(r, f.source)).filter((v) => v != null && v !== "").map((v) => canonical(v)))] : [];
-    const value = !vals.length ? undefined : vals.length === 1 ? JSON.parse(vals[0]) : vals.sort().map((v) => JSON.parse(v));
-    const partial = value !== undefined ? [] : (f.partial_source || []).map((p) => [p, [...new Set(recs.map((r) => getPath(r, p)).filter((v) => v != null && v !== ""))]]).filter(([, v]) => v.length);
-    return { ...f, value, partial };
-  });
-  const recorded = Object.fromEntries(fields.filter((f) => f.value !== undefined).map((f) => [f.field, f.value]));
-  const json = canonical(recorded);
-  return { fields, recorded, json, hash: sha256(json), missing: fields.filter((f) => f.value === undefined).map((f) => f.field) };
+function fingerprint(run) {
+  const fields = FP.fields.map((f) => ({ ...f, value: getPath(run, f.path) ?? undefined }));
+  return { fields, hash: run.fingerprint.hash, values: Object.fromEntries(fields.map((f) => [f.field, f.value])) };
 }
 const fieldName = (f) => f.replace(/_/g, " ").replace(/\bcpu\b/g, "CPU").replace(/\bos\b/, "OS").replace(/\bnic\b/, "NIC");
 function fieldValue(v) {
@@ -345,25 +318,25 @@ function fingerprintLine(fp, name) {
     copyButton(fp.hash, "Copy"),
     h("button", { type: "button", class: "copy", onclick: () => openDrawer(fp, name || "Benchmark Fingerprint") }, "Fields"));
 }
-function fieldsTable(fp, other) {
-  const rows = fp.fields.filter((f) => f.value !== undefined);
+function fieldsTable(rows) {
   return h("table", { class: "fptable" },
     h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Field"), h("th", { scope: "col" }, "Value"))),
     h("tbody", {}, rows.map((f) => h("tr", {}, h("th", { scope: "row" }, fieldName(f.field)), h("td", {}, fieldValue(f.value))))));
 }
 function openDrawer(fp, title) {
   const d = document.getElementById("drawer");
+  const groups = [...new Set(fp.fields.map((f) => f.group))];
   const missing = fp.fields.filter((f) => f.value === undefined);
   d.replaceChildren(
     h("div", { class: "drawer-head" }, h("h2", {}, title),
       h("button", { type: "button", class: "copy", onclick: closeDrawer, "aria-label": "Close" }, "Close")),
     h("p", {}, h("code", { class: "fp-full" }, fp.hash)),
-    h("h3", {}, "Recorded"), fieldsTable(fp),
-    h("h3", {}, "Not recorded"),
-    h("table", { class: "fptable" }, h("tbody", {}, missing.map((f) => h("tr", {}, h("th", { scope: "row" }, fieldName(f.field)),
-      h("td", {}, h("span", { class: "nr" }, "not recorded"),
-        f.partial.length ? h("div", { class: "partial" }, f.partial.map(([p, vs]) => `${p}: ${vs.slice(0, 6).join(", ")}${vs.length > 6 ? ` and ${vs.length - 6} more` : ""}`).join(" · ")) : null))))),
-    h("h3", {}, "Hashed JSON"), h("pre", { class: "mono raw fp-json" }, fp.json), copyButton(fp.json, "Copy JSON"));
+    groups.map((g) => {
+      const rows = fp.fields.filter((f) => f.group === g && f.value !== undefined);
+      return rows.length ? [h("h3", {}, g[0].toUpperCase() + g.slice(1)), fieldsTable(rows)] : null;
+    }),
+    missing.length ? [h("h3", {}, "Not recorded"), h("p", { class: "note" }, missing.map((f) => fieldName(f.field)).join(", "))] : null,
+    h("h3", {}, "Hashed JSON"), h("pre", { class: "mono raw fp-json" }, canonical(Object.fromEntries(fp.fields.map((f) => [f.field, f.value ?? null])))));
   d.hidden = false;
   d.querySelector("button").focus();
 }
@@ -371,15 +344,12 @@ function closeDrawer() { const d = document.getElementById("drawer"); if (d) d.h
 addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
 // fields that differ between two fingerprints, ignoring the ones that name the build
 function fingerprintDiff(a, b, ignore) {
-  return FP.fields.map((f) => f.field).filter((k) => !ignore.includes(k) && canonical(a.recorded[k]) !== canonical(b.recorded[k]));
+  return FP.fields.map((f) => f.field).filter((k) => !ignore.includes(k) && canonical(a.values[k] ?? null) !== canonical(b.values[k] ?? null));
 }
 
-// load the data, then hand over to the page's template
+// load the run list, then hand over to the page's template
 function start(init) {
-  load().then(() => {
-    CAT = catalogue();
-    init();
-  }).catch((e) => {
+  load().then(init).catch((e) => {
     document.getElementById("out").replaceChildren(h("p", {}, `The data did not load: ${e.message}`));
   });
 }

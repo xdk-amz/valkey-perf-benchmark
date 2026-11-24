@@ -288,7 +288,7 @@ def parse_args() -> argparse.Namespace:
         "the config's profiles/ directory, or a path. Overrides the config's.",
     )
     matrix_runner.add_arguments(parser.add_argument_group("matrix configs"))
-    vpb_result.add_arguments(parser.add_argument_group("vpb-result/2 records"))
+    vpb_result.add_arguments(parser.add_argument_group("run files"))
 
     parser.add_argument(
         "--cluster-mode-filter",

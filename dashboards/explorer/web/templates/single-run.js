@@ -1,4 +1,4 @@
-/* Template: Single run. One scenario run on one commit, shown as absolute numbers (TEMPLATES.md). */
+/* Template: Single run. One run file (one build on one setup), shown as absolute numbers (TEMPLATES.md). */
 "use strict";
 
 // ---------- state <-> URL ----------
@@ -7,19 +7,16 @@ let lastHash = "";
 
 function parseHash(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, ""));
-  const ss = scenarios();
-  const s = ss.includes(q.get("s")) ? q.get("s") : ss[0];
-  const bs = branches(s);
-  const b = bs.includes(q.get("b")) ? q.get("b") : bs[0];
-  const cs = commits(s, b);
-  const c = cs.includes(q.get("c")) ? q.get("c") : cs[0];
+  const fs = families();
+  const given = entry(q.get("run"));
+  const s = fs.includes(q.get("s")) ? q.get("s") : given ? given.families[0] : fs[0];
+  const rs = runsOf(s).map((r) => r.id);
+  const r = rs.includes(q.get("run")) ? q.get("run") : rs[0];
   const cell = /^[0-9a-f]{8}$/.test(q.get("cell") || "") ? q.get("cell") : "";
-  const ms = runMetrics({ s, b, c });
-  const m = ms.includes(q.get("m")) ? q.get("m") : ms[0];
-  return { s, b, c, m, cell };
+  return { s, r, m: q.get("m") || "", cell };
 }
 function toHash(st) {
-  const q = new URLSearchParams({ s: st.s, b: st.b, c: st.c });
+  const q = new URLSearchParams({ s: st.s, run: st.r });
   if (st.m) q.set("m", st.m);
   if (st.cell) q.set("cell", st.cell);
   return "#" + q.toString();
@@ -31,53 +28,45 @@ function commit() {
 }
 
 // ---------- the run ----------
-function runOf() {
-  const recs = DATA.records.filter((r) => r.family === S.s && r.build.ref === S.b && sha9(r) === S.c);
-  const varying = ROW_DIMS.filter(([, , get]) => new Set(recs.map(get)).size > 1);
-  const rowOf = (r) => [r.command, ...varying.map(([, name, get]) => (name ? `${name} ${get(r)}` : String(get(r))))].join(" · ");
+function runOf(doc) {
+  const cs = doc.cells.filter((c) => c.family === S.s);
+  const varying = ROW_DIMS.filter(([, , get]) => new Set(cs.map(get)).size > 1);
+  const rowOf = (c) => [c.command, ...varying.map(([, name, get]) => `${name} ${get(c)}`)].join(" · ");
+  // two cells on one row, shape and mix (cells that differ only in a parameter the format does not name) keep
+  // their own ids as rows
+  const seen = new Map();
+  for (const c of cs) { const k = [rowOf(c), shapeKey(c), c.mix].join("\u0001"); seen.set(k, (seen.get(k) || 0) + 1); }
   const cells = new Map();
-  for (const r of recs) {
-    const key = [rowOf(r), shapeKey(r), r.mix].join("\u0001");
-    let c = cells.get(key);
-    if (!c) { c = { key, hash: fnv(key), row: rowOf(r), shape: shapeKey(r), mix: r.mix, by: {} }; cells.set(key, c); }
-    c.by[r.metric] = r;
+  for (const c of cs) {
+    const row = seen.get([rowOf(c), shapeKey(c), c.mix].join("\u0001")) > 1 ? c.id : rowOf(c);
+    cells.set(c.id, { key: c.id, hash: fnv(c.id), row, shape: shapeKey(c), mix: c.mix, cell: c, by: cellView(c) });
   }
-  const metrics = METRIC_ORDER.filter((m) => recs.some((r) => r.metric === m));
+  const metrics = METRIC_ORDER.filter((m) => cs.some((c) => c.metrics[m]));
   const shown = metrics.includes("server_ops") ? metrics.filter((m) => m !== "ops") : metrics;
-  return { recs, cells, metrics, shown, varying };
+  return { doc, run: doc.run, cells, metrics, shown, varying };
 }
 
 // ---------- render ----------
-function renderSelectors() {
+function renderSelectors(run) {
   const fill = (id, values, cur, lab) => {
     const el = document.getElementById(id);
     el.replaceChildren(...values.map((v) => h("option", { value: v }, lab(v))));
     el.value = cur;
   };
-  fill("sel-scenario", scenarios(), S.s, (v) => v);
-  fill("sel-branch", branches(S.s), S.b, (v) => {
-    const b = latest(S.s, v);
-    return `${v} (${b.repo})`;
-  });
-  fill("sel-commit", commits(S.s, S.b), S.c, (v) => {
-    const t = CAT.get(S.s).get(S.b).get(v).time;
-    return t ? `${v} · ${t.slice(0, 10)}` : v;
-  });
-  fill("sel-metric", runMetrics(S), S.m, (v) => mlabel(v));
+  fill("sel-scenario", families(), S.s, (v) => v);
+  fill("sel-run", runsOf(S.s).map((r) => r.id), S.r, (v) => runLabel(entry(v)));
+  fill("sel-metric", run ? run.shown : [], S.m, (v) => mlabel(v));
 }
 
 function runHeader(run) {
-  const r = run.recs[0];
-  const types = [...new Set(run.recs.map((x) => x.hardware.server).filter(Boolean))];
-  const servers = types.length ? types.join(", ") : "a server whose type is not recorded";
-  const runs = run.recs.filter((x) => x.metric === S.m && x.n > 0).map((x) => x.n);
+  const r = run.run, b = r.build;
   return [
-    h("p", { class: "ids" }, `${S.s} · `, h("a", { href: `https://github.com/${r.build.repo}/tree/${r.build.ref}` }, `${r.build.repo} ${r.build.ref}`),
-      ` · commit `, h("a", { href: `https://github.com/${r.build.repo}/commit/${r.build.sha}`, class: "mono" }, r.build.sha.slice(0, 9)),
-      r.build.time ? ` (${r.build.time.slice(0, 10)})` : "",
-      ` · ${r.harness.name} `, h("span", { class: "mono" }, (r.harness.sha || "").slice(0, 7))),
-    fingerprintLine(fingerprint(run.recs)),
-
+    h("p", { class: "ids" }, `${S.s} · `, h("a", { href: `https://github.com/${b.repo}/tree/${b.ref}` }, `${b.repo} ${b.ref}`),
+      ` · commit `, h("a", { href: `https://github.com/${b.repo}/commit/${b.sha}`, class: "mono" }, b.sha.slice(0, 9)),
+      b.time ? ` (${b.time.slice(0, 10)})` : "",
+      r.started ? ` · run ${r.started.slice(0, 10)}` : "",
+      ` · valkey-perf-benchmark `, h("span", { class: "mono" }, (r.harness.sha || "").slice(0, 7))),
+    fingerprintLine(fingerprint(r)),
   ];
 }
 
@@ -122,7 +111,7 @@ function sectionTables(run, sec) {
               const cls = ["num", gstart(i)].filter(Boolean).join(" ");
               if (!r) return h("td", { class: cls }, "");
               const tip = r.value == null ? `missing: ${r.missing}`
-                : `${exact(r.value, md.unit)}, median of ${r.n} runs` + (r.spread && r.spread.cv != null ? `, CV ${(r.spread.cv * 100).toFixed(1)}%` : "");
+                : `${exact(r.value, md.unit)}, median of ${r.n} reps` + (r.spread && r.spread.cv != null ? `, CV ${(r.spread.cv * 100).toFixed(1)}%` : "");
               return h("td", { class: cls }, h("button", { type: "button", class: r.value == null ? "cellbtn miss" : "cellbtn", title: tip,
                 onclick: () => { S.cell = c.hash; commit(); window.scrollTo(0, 0); } }, compact(r.value, md.unit)));
             })))))),
@@ -204,7 +193,7 @@ function panel(rows, metric, title) {
     }
     const sp = r.rec && r.rec.spread;
     const tip = `${title} · ${r.label}\n` + (v > 0
-      ? `${exact(v, md.unit)}, median of ${r.rec.n} runs` +
+      ? `${exact(v, md.unit)}, median of ${r.rec.n} reps` +
         (sp ? `\nrange ${exact(sp.min, md.unit)} to ${exact(sp.max, md.unit)}${sp.cv != null ? `, CV ${(sp.cv * 100).toFixed(1)}%` : ""}` : "")
       : r.rec ? `missing: ${r.rec.missing}` : "not measured");
     const hit = svg("rect", { class: "hit", x: L + step * i, y: TOP, width: step, height: PH + xlab, tabindex: r.cell ? 0 : null,
@@ -250,14 +239,8 @@ function sectionPanels(run, sec, m) {
     h("div", { class: "panels" }, figs));
 }
 
-function runMetrics(st) {
-  const ms = METRIC_ORDER.filter((m) => DATA.records.some((r) => r.family === st.s && r.build.ref === st.b && sha9(r) === st.c && r.metric === m && r.value != null));
-  return ms.includes("server_ops") ? ms.filter((m) => m !== "ops") : ms;
-}
-
-function renderRun() {
-  const run = runOf();
-  if (!run.recs.length) return [h("p", {}, "No results for this commit.")];
+function renderRun(run) {
+  if (!run.cells.size) return [h("p", {}, "No cells of this scenario in the run.")];
   const cell = S.cell && [...run.cells.values()].find((c) => c.hash === S.cell);
   if (S.cell) return renderCell(run, cell);
   const appendix = h("details", { class: "appendix", id: "exact" }, h("summary", {}, "Exact values (tables)"));
@@ -273,47 +256,50 @@ function renderCell(run, cell) {
   const back = h("button", { type: "button", class: "back", onclick: () => { S.cell = ""; commit(); } }, "\u2190 Back to the run");
   if (!cell) return [back, h("p", {}, "This cell is not in the selected run.")];
   const ms = run.metrics.filter((m) => cell.by[m]);
-  const any = cell.by[ms[0]];
-  const rp = DATA.reproduce[any.reproduce];
+  const r = run.run, c = cell.cell, fp = r.fingerprint;
   const sec = sectionsOf(S.s).find((s) => s.test(cell.mix));
   return [h("section", { class: "block", id: "cell" },
     back,
     h("h2", { style: "margin-top: 12px" }, [cell.row, shapeLabel(cell.shape), sec.head ? `${sec.head}: ${MIX_LABEL[cell.mix] || cell.mix}` : sec.title].filter(Boolean).join(" · ")),
     h("dl", { class: "kv" }, [
-      ["Scenario", S.s], ["Branch", `${any.build.repo} ${any.build.ref}`], ["Commit", any.build.sha],
-      ["Mix id", cell.mix], ["Pipeline", any.pipeline], ["Clients", any.clients], ["io-threads", any.io_threads ?? "not recorded"],
-      ["Server", any.hardware.server || "not recorded"], ["Client host", any.hardware.client || "not recorded"],
-      ["Scenario id", any.scenario], ["Command sent", any.command_line || "not recorded"],
-      ["Harness", `${any.harness.repo} ${any.harness.sha}`], ["Data set", any.data_set],
+      ["Scenario", S.s], ["Run", r.id], ["Branch", `${r.build.repo} ${r.build.ref}`], ["Commit", r.build.sha],
+      ["Mix id", c.mix], ["Pipeline", c.pipeline], ["Clients", c.clients], ["io-threads", fp.io_threads ?? "not recorded"],
+      ["Server", fp.server.instance_type || "not recorded"], ["Client host", fp.client.instance_type || "not recorded"],
+      ["Cell id", c.id], ["Command sent", c.command_line || "not recorded"],
+      ["Harness", `${r.harness.repo} ${r.harness.sha || "not recorded"}`], ["Data set", r.data_set],
     ].map(([k, v]) => [h("dt", {}, k), h("dd", {}, String(v))])),
     h("h3", {}, "Values"),
     h("table", {},
-      h("thead", {}, h("tr", {}, ["Metric", "Median", "Valid runs", "Min", "Max", "CV"].map((x, i) => h("th", { scope: "col", class: i ? "num" : "" }, x)))),
+      h("thead", {}, h("tr", {}, ["Metric", "Median", "Valid reps", "Min", "Max", "CV"].map((x, i) => h("th", { scope: "col", class: i ? "num" : "" }, x)))),
       h("tbody", {}, ms.map((m) => {
-        const r = cell.by[m], u = DATA.metrics[m].unit, sp = r.spread;
+        const v = cell.by[m], u = DATA.metrics[m].unit, sp = v.spread;
         return h("tr", {}, h("th", { scope: "row" }, mlabel(m)),
-          h("td", { class: "num" }, r.value == null ? `missing: ${r.missing}` : exact(r.value, u)), h("td", { class: "num" }, r.n),
+          h("td", { class: "num" }, v.value == null ? `missing: ${v.missing}` : exact(v.value, u)), h("td", { class: "num" }, v.n),
           h("td", { class: "num" }, sp ? exact(sp.min, u) : ""), h("td", { class: "num" }, sp ? exact(sp.max, u) : ""),
           h("td", { class: "num" }, sp && sp.cv != null ? `${(sp.cv * 100).toFixed(1)}%` : ""));
       }))),
-    strip(cell.by[S.m] || cell.by[run.shown[0]] || any),
+    c.missing ? h("p", { class: "note" }, `Missing: ${c.missing}`) : null,
+    strip(cell.by[S.m] || cell.by[run.shown[0]] || cell.by[ms[0]]),
     h("h3", { style: "margin-top: 20px" }, "Rerun"),
-    reproBlock(rp, any),
-    runsTable(cell, ms),
-    h("details", {}, h("summary", {}, "Records as stored"), h("pre", { class: "mono raw" }, JSON.stringify(ms.map((m) => cell.by[m]), null, 1))))];
+    reproBlock(r),
+    runsTable(c, ms),
+    h("details", {}, h("summary", {}, "Cell as stored"), h("pre", { class: "mono raw" }, JSON.stringify(c, null, 1))))];
 }
 
-// ---------- method and sources ----------
-function render() {
-  renderSelectors();
+async function render() {
+  const want = S.r;
+  const doc = want ? await getRun(want) : null;
+  if (S.r !== want) return; // a newer selection is rendering
+  const run = doc ? runOf(doc) : null;
+  if (run && !run.shown.includes(S.m)) { S.m = run.shown[0] || ""; const hsh = toHash(S); lastHash = hsh; history.replaceState(null, "", hsh); }
+  renderSelectors(run);
   closeDrawer();
-  document.getElementById("out").replaceChildren(...renderRun().filter(Boolean));
+  document.getElementById("out").replaceChildren(...(run ? renderRun(run) : [h("p", {}, "No runs.")]).filter(Boolean));
 }
 
 function wire() {
-  document.getElementById("sel-scenario").addEventListener("change", (e) => { S = parseHash(toHash({ s: e.target.value, b: "", c: "", m: S.m })); commit(); });
-  document.getElementById("sel-branch").addEventListener("change", (e) => { S = parseHash(toHash({ s: S.s, b: e.target.value, c: "", m: S.m })); commit(); });
-  document.getElementById("sel-commit").addEventListener("change", (e) => { S = parseHash(toHash({ s: S.s, b: S.b, c: e.target.value, m: S.m })); commit(); });
+  document.getElementById("sel-scenario").addEventListener("change", (e) => { S = parseHash(toHash({ s: e.target.value, r: "", m: S.m })); commit(); });
+  document.getElementById("sel-run").addEventListener("change", (e) => { S = { s: S.s, r: e.target.value, m: S.m, cell: "" }; commit(); });
   document.getElementById("sel-metric").addEventListener("change", (e) => { S.m = e.target.value; S.cell = ""; commit(); });
   window.addEventListener("hashchange", () => {
     if (location.hash === lastHash) return;
@@ -326,7 +312,8 @@ function wire() {
 start(() => {
   S = parseHash(location.hash);
   lastHash = location.hash;
-  document.getElementById("meta").textContent = `${DATA.records.length.toLocaleString("en-US")} results · ${scenarios().length} scenarios`;
+  const n = DATA.runs.reduce((a, r) => a + r.cells, 0);
+  document.getElementById("meta").textContent = `${DATA.runs.length} runs · ${n.toLocaleString("en-US")} cells · ${families().length} scenarios`;
   wire();
-  render();
+  return render();
 });

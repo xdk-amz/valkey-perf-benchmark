@@ -1,13 +1,13 @@
-"""Tests for dashboards/explorer: the vpb-result/1 checks, the fingerprint, the record merge, the CLI and the two
+"""Tests for dashboards/explorer: the vpb-result run format and its checks, the fingerprint, the CLI and the two
 templates' own code (run in node through tests/explorer_harness.js).
 
-Fixtures in tests/fixtures/explorer are vpb-result/1 files VPB's own writer (vpb_result.py) made from published
-runs' metrics.json rows:
-pr4959-sets-throughput.json.gz is the server-side throughput of the valkey PR #4959 set scenarios (head 2605393f2
-on set-member-ttl, merge-base 8c82072a6 on unstable) with one shared reproduce block; ci-6c11c7fb2.json.gz is one
-valkey-io CI run of the continuous benchmark.
+Fixtures in tests/fixtures/explorer are run files VPB's writer (vpb_result.py) made from published runs'
+metrics.json rows: the valkey PR #4959 set scenarios on unstable (merge-base 8c82072a6) and on set-member-ttl
+(head 2605393f2), server-side throughput only, and one valkey-io CI commit of the continuous benchmark, whose
+io-threads 1 and 9 are two runs.
 """
 
+import copy
 import gzip
 import hashlib
 import json
@@ -17,120 +17,155 @@ from pathlib import Path
 
 import pytest
 
-from dashboards.explorer import cli, fingerprint, idscan, records, schema
+from dashboards.explorer import cells, cli, fingerprint, idscan, schema
 
 HERE = Path(__file__).resolve().parent
 FIX = HERE / "fixtures" / "explorer"
-SETS = FIX / "pr4959-sets-throughput.json.gz"
-CI = FIX / "ci-6c11c7fb2.json.gz"
-SHA = "a" * 40
-PR, BASE = "2605393f2", "8c82072a6"
+BASE = FIX / "pr4959-unstable.json.gz"
+PR = FIX / "pr4959-set-member-ttl.json.gz"
+CI1 = FIX / "ci-6c11c7fb2-iot1.json.gz"
+CI9 = FIX / "ci-6c11c7fb2-iot9.json.gz"
+ALL = (BASE, PR, CI1, CI9)
+BASE_ID, PR_ID = "2026-11-19-pr4959-unstable", "2026-11-19-pr4959-set-member-ttl"
+CI1_ID, CI9_ID = (
+    "2026-11-20-ci-unstable-6c11c7fb2-iot1",
+    "2026-11-20-ci-unstable-6c11c7fb2-iot9",
+)
 
 
 def load(p):
     return json.loads(gzip.open(p, "rt", encoding="utf-8").read())
 
 
-# ---------- schema ----------
+def unzip(p, d: Path) -> Path:
+    f = d / p.name[: -len(".gz")]
+    f.write_text(gzip.open(p, "rt", encoding="utf-8").read())
+    return f
+
+
+# ---------- the format ----------
 def test_fixtures_pass_the_checks():
-    for p in (SETS, CI):
+    for p in ALL:
         assert schema.check_doc(load(p), p.name) == []
 
 
-def test_schema_rejects_broken_records():
-    doc = load(CI)
-    r = doc["records"][0]
-    bad = [
-        ("missing field", lambda r: r.pop("workload")),
-        ("short sha", lambda r: r["build"].update(sha="abc")),
-        ("value without missing", lambda r: r.update(missing="x")),
-        ("unknown data set", lambda r: r.update(data_set="official")),
-        ("unknown metric", lambda r: r.update(metric="qps")),
+def test_one_file_is_one_run():
+    doc = load(PR)
+    assert set(doc) == {"schema", "run", "cells"} and doc["schema"] == "vpb-result"
+    assert (
+        doc["run"]["build"]["ref"] == "set-member-ttl"
+        and doc["run"]["fingerprint"]["io_threads"] == 4
+    )
+    c = doc["cells"][0]
+    assert (
+        set(c) == set(cells.CELL_KEYS) and "io_threads" not in c and "hardware" not in c
+    )
+    assert set(c["metrics"]["server_ops"]) == {"median", "min", "max", "cv"}
+    assert {"rep", "pair", "t", "ok", "server_ops"} <= set(c["runs"][0])
+
+
+def broken():
+    def bump(d):
+        d["cells"][0]["runs"][0]["server_ops"] += 1
+
+    return [
+        ("missing run field", lambda d: d["run"].pop("reproduce")),
+        ("short sha", lambda d: d["run"]["build"].update(sha="abc")),
+        ("unknown data set", lambda d: d["run"].update(data_set="official")),
+        ("uppercase run id", lambda d: d["run"].update(id="Run 1")),
+        (
+            "fingerprint fact changed",
+            lambda d: d["run"]["fingerprint"]["server"].update(kernel="7.0"),
+        ),
+        ("summary stale", bump),
+        ("unknown metric", lambda d: d["cells"][0]["runs"][0].update(qps=1.0)),
+        ("why on a valid rep", lambda d: d["cells"][0]["runs"][0].update(why="x")),
+        (
+            "rep repeated",
+            lambda d: d["cells"][0]["runs"].append(dict(d["cells"][0]["runs"][0])),
+        ),
+        ("cell id repeated", lambda d: d["cells"].append(copy.deepcopy(d["cells"][0]))),
+        ("per-cell io-threads", lambda d: d["cells"][0].update(io_threads=4)),
+        (
+            "host identifier key",
+            lambda d: d["run"]["fingerprint"]["server"].update(hostname="h"),
+        ),
+        ("missing without reason", lambda d: d["cells"][0].update(missing="x")),
+        ("an older format", lambda d: d.update(schema="vpb-result/1")),
     ]
-    for what, change in bad:
-        d = json.loads(json.dumps(doc))
-        change(d["records"][0])
-        assert schema.check_doc(d, "x"), what
-    assert r["data_set"] == "official-ci"
 
 
-def test_schema_requires_matching_fingerprints():
-    doc = load(CI)
-    doc["records"][0]["hardware"][
-        "server"
-    ] = "r7g.2xlarge"  # changes the run's instance type field
-    assert any("fingerprints" in e for e in schema.check_doc(doc, "x"))
-    doc.pop("fingerprints")
-    assert any("fingerprints" in e for e in schema.check_doc(doc, "x"))
-    assert schema.check_doc(doc, "x", require_fingerprints=False) == []
+@pytest.mark.parametrize("what,change", broken())
+def test_check_rejects(what, change):
+    d = load(PR)
+    change(d)
+    assert schema.check_doc(d, "x"), what
 
 
-def test_location_matches_the_data_set(tmp_path):
-    doc = load(SETS)
-    ok = tmp_path / "data" / "curated" / "xdk-amz" / "f.json"
+def test_location_is_data_set_and_run_id(tmp_path):
+    doc = load(PR)
+    ok = tmp_path / "data" / "curated" / "xdk-amz" / f"{PR_ID}.json"
     ok.parent.mkdir(parents=True)
     assert schema.check_location(doc, ok, tmp_path / "data") == []
-    wrong = tmp_path / "data" / "official-ci" / "f.json"
-    wrong.parent.mkdir(parents=True)
-    assert schema.check_location(doc, wrong, tmp_path / "data")
+    for wrong in ("official-ci/" + PR_ID, "curated/xdk-amz/other"):
+        assert schema.check_location(
+            doc, tmp_path / "data" / f"{wrong}.json", tmp_path / "data"
+        )
 
 
 # ---------- fingerprint ----------
-def test_fingerprint_hashes_the_canonical_json_of_recorded_fields():
-    fields = [
-        {"field": "commit", "source": "build.sha"},
-        {"field": "scenario", "source": "scenario"},
-        {"field": "kernel", "source": None},
-    ]
-    recs = [
-        {"build": {"sha": SHA}, "scenario": "b"},
-        {"build": {"sha": SHA}, "scenario": "a"},
-    ]
-    fp = fingerprint.fingerprint(recs, fields)
-    text = '{"commit":"' + SHA + '","scenario":["a","b"]}'
-    assert fp["json"] == text
-    assert fp["hash"] == hashlib.sha256(text.encode()).hexdigest()
-    assert fp["missing"] == ["kernel"]
+def test_fingerprint_hashes_every_field_of_the_spec_nulls_included():
+    run = load(CI1)["run"]
+    spec = fingerprint.load_spec()
+    vals = {f["field"]: fingerprint.get_path(run, f["path"]) for f in spec}
+    text = json.dumps(vals, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert run["fingerprint"]["hash"] == hashlib.sha256(text.encode()).hexdigest()
+    assert vals["io_threads"] == 1 and vals["instance_type"] is None and "cores" in vals
+    assert {f["path"].split(".")[0] for f in spec} == {
+        "build",
+        "harness",
+        "fingerprint",
+    }
 
 
-def test_fingerprint_of_the_continuous_run():
-    doc = load(CI)
-    fp = fingerprint.fingerprint(doc["records"])
-    assert sorted(fp["recorded"]) == [
-        "commit",
-        "measurement",
-        "repository",
-        "scenario",
-        "scenario_family",
-    ]
-    assert fp["hash"] == doc["fingerprints"][0]["hash"]
-
-
-# ---------- records ----------
-def test_merge_joins_the_runs_of_one_cell():
-    doc = load(CI)
-    r = next(x for x in doc["records"] if x["metric"] == "ops")
-    a, b = json.loads(json.dumps(r)), json.loads(json.dumps(r))
-    a["runs"] = [records.run(100.0)]
-    b["runs"] = [records.run(300.0), records.run(None, ok=False, why="failed")]
-    other = json.loads(json.dumps(r))
-    other["pipeline"] += 1
-    merged = records.merge([a, b, other])
-    assert len(merged) == 2
-    m = merged[0]
-    assert (m["value"], m["n"], len(m["runs"])) == (200.0, 2, 3)
-    assert m["spread"]["min"] == 100.0 and m["missing"] is None
-
-
-def test_merge_docs_keeps_every_table_and_recomputes_fingerprints():
-    sets, ci = load(SETS), load(CI)
-    doc = records.merge_docs([sets, ci, ci])
-    assert len(doc["records"]) == len(sets["records"]) + len(ci["records"])
-    assert all(
-        len(r["runs"]) == 2 * len(c["runs"])
-        for r, c in zip(doc["records"][-3:], ci["records"][-3:])
+def test_runs_of_one_commit_differ_in_their_fingerprint():
+    a, b = load(CI1)["run"], load(CI9)["run"]
+    assert (
+        a["build"] == b["build"]
+        and a["fingerprint"]["hash"] != b["fingerprint"]["hash"]
     )
-    assert schema.check_doc(doc, "merged") == []
+    fa, fb = fingerprint.fields(a), fingerprint.fields(b)
+    assert [k for k in fa if fa[k] != fb[k]] == ["io_threads"]
+
+
+# ---------- cells ----------
+def test_summary_and_missing_come_from_the_reps():
+    c = {"runs": [cells.rep(1, {"ops": 100.0}), cells.rep(2, {"ops": 300.0}), cells.rep(3, {}, ok=False, why="failed")],
+         "metrics": None, "missing": None}  # fmt: skip
+    cells.summarize(c)
+    assert (
+        c["metrics"]
+        == {"ops": {"median": 200.0, "min": 100.0, "max": 300.0, "cv": 0.5}}
+        and c["missing"] is None
+    )
+    bad = cells.summarize(
+        {
+            "runs": [cells.rep(1, {}, ok=False, why="No results")],
+            "metrics": None,
+            "missing": None,
+        }
+    )
+    assert bad["metrics"] == {} and bad["missing"] == "No results"
+
+
+def test_merge_numbers_new_reps_after_the_old():
+    doc = load(CI1)
+    c = doc["cells"][0]
+    merged = cells.merge_cells(doc["cells"], [c])
+    m = next(x for x in merged if x["id"] == c["id"])
+    n = len(c["runs"])
+    assert [r["rep"] for r in m["runs"]] == list(range(1, 2 * n + 1))
+    assert len(merged) == len(doc["cells"])
 
 
 # ---------- identifier scan ----------
@@ -144,68 +179,105 @@ def test_idscan_flags_internal_identifiers_and_allows_key_names(tmp_path):
 
 
 def test_fixtures_hold_no_internal_identifiers(tmp_path):
-    for p in (SETS, CI):
-        f = tmp_path / p.stem
-        f.write_text(gzip.open(p, "rt", encoding="utf-8").read())
-        assert list(idscan.scan(f)) == []
+    for p in ALL:
+        assert list(idscan.scan(unzip(p, tmp_path))) == []
 
 
 # ---------- CLI ----------
-def test_build_writes_the_site_from_data_files(tmp_path):
+def test_build_writes_one_data_file_per_run(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
-    for p in (SETS, CI):
-        (data / p.stem).write_text(gzip.open(p, "rt", encoding="utf-8").read())
+    for p in ALL:
+        unzip(p, data)
     out = tmp_path / "site"
     assert cli.main(["build", str(data), "--out", str(out)]) == 0
     manifest = json.loads((out / "data" / "manifest.json").read_text())
-    assert manifest["files"] == ["results.json"]
-    doc = json.loads((out / "data" / "results.json").read_text())
-    assert len(doc["records"]) == len(load(SETS)["records"]) + len(load(CI)["records"])
+    assert sorted(r["id"] for r in manifest["runs"]) == sorted(
+        [BASE_ID, PR_ID, CI1_ID, CI9_ID]
+    )
+    e = next(r for r in manifest["runs"] if r["id"] == PR_ID)
+    assert (e["file"], e["cells"], e["families"], e["fingerprint"]["io_threads"]) == (
+        f"{PR_ID}.json",
+        683,
+        ["set commands"],
+        4,
+    )
     for f in (
         "index.html",
         "compare.html",
         "common.js",
-        "templates/single-run.js",
         "templates/compare.js",
         "fingerprint-fields.json",
+        "metrics.json",
     ):
         assert (out / f).exists(), f
-    assert 'class="views"' in (out / "index.html").read_text()
+    assert json.loads((out / "metrics.json").read_text())["metrics"]["server_ops"][
+        "bar"
+    ] == [2, 20, "ns per call"]
 
 
 def test_build_inline_writes_self_contained_pages(tmp_path):
-    data = tmp_path / "ci.json"
-    data.write_text(gzip.open(CI, "rt", encoding="utf-8").read())
     out = tmp_path / "site"
-    assert cli.main(["build", str(data), "--out", str(out), "--inline"]) == 0
+    assert (
+        cli.main(["build", str(unzip(CI1, tmp_path)), "--out", str(out), "--inline"])
+        == 0
+    )
     assert sorted(p.name for p in out.iterdir()) == ["compare.html", "index.html"]
     page = (out / "compare.html").read_text()
     assert "<script src=" not in page and '<link rel="stylesheet"' not in page
-    assert 'class="vpb-data"' in page and 'id="vpb-fingerprint-fields"' in page
-    assert 'class="views"' not in page
+    assert (
+        'class="vpb-run"' in page
+        and 'id="vpb-metrics"' in page
+        and 'id="vpb-fingerprint-fields"' in page
+    )
 
 
-def test_build_reads_vpb_results_directories_and_skips_other_json(tmp_path):
-    run = tmp_path / "results" / SHA
-    run.mkdir(parents=True)
-    (run / "vpb-result.json").write_text(gzip.open(CI, "rt", encoding="utf-8").read())
-    (run / "metrics.json").write_text("[]")
-    out = tmp_path / "site"
-    assert cli.main(["build", str(tmp_path / "results"), "--out", str(out)]) == 0
+def test_build_reads_vpb_results_directories_and_rejects_other_files(tmp_path):
+    runs = tmp_path / "results" / ("c" * 40) / "vpb-runs"
+    runs.mkdir(parents=True)
+    unzip(CI1, runs)
+    (runs.parent / "metrics.json").write_text("[]")
+    assert (
+        cli.main(["build", str(tmp_path / "results"), "--out", str(tmp_path / "site")])
+        == 0
+    )
     with pytest.raises(SystemExit):
-        cli.main(["build", str(run / "metrics.json"), "--out", str(out)])
+        cli.main(
+            ["build", str(runs.parent / "metrics.json"), "--out", str(tmp_path / "s2")]
+        )
+    twin = tmp_path / "twin"
+    twin.mkdir()
+    unzip(CI1, twin)
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "build",
+                str(tmp_path / "results"),
+                str(twin),
+                "--out",
+                str(tmp_path / "s3"),
+            ]
+        )
+
+
+def test_check_needs_every_metric_defined(tmp_path):
+    f = unzip(CI1, tmp_path)
+    m = tmp_path / "metrics.json"
+    m.write_text(
+        json.dumps({"schema": "vpb-metrics", "metrics": {"ops": cells.METRICS["ops"]}})
+    )
+    assert cli.main(["check", str(f), "--metrics", str(m)]) == 1
+    assert cli.main(["check", str(f)]) == 0
 
 
 def test_check_fails_on_an_identifier(tmp_path):
-    doc = load(CI)
-    doc["sources"][0]["name"] += " on 10.1.2.3"
-    f = tmp_path / "official-ci" / "x.json"
+    doc = load(CI1)
+    doc["run"]["reproduce"] += " --target-ip 10.1.2.3"
+    f = tmp_path / "official-ci" / f"{CI1_ID}.json"
     f.parent.mkdir()
     f.write_text(json.dumps(doc))
     assert cli.main(["check", str(f), "--data-root", str(tmp_path)]) == 1
-    doc["sources"][0]["name"] = "ok"
-    f.write_text(json.dumps(doc))
+    f.write_text(json.dumps(load(CI1)))
     assert cli.main(["check", str(f), "--data-root", str(tmp_path)]) == 0
 
 
@@ -229,8 +301,8 @@ def harness(template, query, *files):
     return json.loads(out.stdout)
 
 
-def series(a_ref, a_sha, a_mix, b_ref, b_sha, b_mix, bar=None):
-    h = f"#s=set+commands&ab={a_ref}&ac={a_sha}&al={a_mix}&bb={b_ref}&bc={b_sha}&bl={b_mix}"
+def series(a, al, b, bl, bar=None):
+    h = f"#a={a}&al={al}&b={b}&bl={bl}"
     return h + (f"&rel={bar[0]}&abs={bar[1]}" if bar else "")
 
 
@@ -240,19 +312,20 @@ EXPIRED = ["exp_one", "exp_10pct", "exp_half", "exp_all_but_1"]
 
 @node
 def test_compare_reproduces_the_4959_verdicts():
-    q = {
-        "default": "",
-        "plain": series("unstable", BASE, "none", "set-member-ttl", PR, "none"),
-    }
+    q = {"default": "", "plain": series(BASE_ID, "none", PR_ID, "none")}
     for m in TTL + EXPIRED:
-        q[m] = series("set-member-ttl", PR, "none", "set-member-ttl", PR, m)
-    got = harness("compare", q, SETS)
+        q[m] = series(PR_ID, "none", PR_ID, m)
+    got = harness("compare", q, BASE, PR)
     plain = got["plain"]["counts"]
     # PR vs unstable, no TTLs: 69 of 71 cells pass (Fail / Pass / Exceed 2 / 60 / 9)
     assert (plain["fail"], plain["pass"], plain["exceed"]) == (2, 60, 9)
     assert got["default"]["counts"] == plain and got["default"]["bar"] == [2, 20]
-    assert got["default"]["a"] == {"br": "unstable", "c": BASE, "sl": "none"}
-    assert got["default"]["b"] == {"br": "set-member-ttl", "c": PR, "sl": "none"}
+    assert got["default"]["a"] == {"r": BASE_ID, "sl": "none"} and got["default"][
+        "b"
+    ] == {"r": PR_ID, "sl": "none"}
+    assert (
+        got["plain"]["diff"] == []
+    )  # same setup: the fingerprints differ only in the build
 
     def summed(mixes):
         cs = [got[m]["counts"] for m in mixes]
@@ -267,10 +340,9 @@ def test_compare_reproduces_the_4959_verdicts():
 
 @node
 def test_compare_bar_is_part_of_the_verdict():
-    q = {
-        "wide": series("unstable", BASE, "none", "set-member-ttl", PR, "none", (5, 50))
-    }
-    c = harness("compare", q, SETS)["wide"]
+    c = harness(
+        "compare", {"wide": series(BASE_ID, "none", PR_ID, "none", (5, 50))}, BASE, PR
+    )["wide"]
     assert c["bar"] == [5, 50] and c["hash"].endswith("&rel=5&abs=50")
     assert (c["counts"]["fail"], c["counts"]["pass"], c["counts"]["exceed"]) == (
         0,
@@ -280,55 +352,55 @@ def test_compare_bar_is_part_of_the_verdict():
 
 
 @node
-def test_page_fingerprint_matches_python():
-    doc = load(SETS)
-    want = {
-        (f["ref"], f["sha"][:9]): f["hash"]
-        for f in fingerprint.for_records(
-            [r for r in doc["records"] if r["mix"] == "none"]
-        )
+def test_compare_works_between_any_two_run_files():
+    q = {
+        "iot": f"#a={CI1_ID}&b={CI9_ID}",
+        "back": f"#a={CI9_ID}&b={CI1_ID}",
+        "same": f"#a={CI1_ID}&b={CI1_ID}",
+        "apart": f"#a={CI1_ID}&b={PR_ID}&bl=none",
     }
-    got = harness(
-        "compare",
-        {"p": series("unstable", BASE, "none", "set-member-ttl", PR, "none")},
-        SETS,
-    )["p"]
+    got = harness("compare", q, BASE, PR, CI1, CI9)
+    iot = got["iot"]
     assert (
-        got["fa"] == want[("unstable", BASE)]
-        and got["fb"] == want[("set-member-ttl", PR)]
-    )
+        iot["m"],
+        sum(iot["counts"][k] for k in ("fail", "pass", "exceed")),
+        iot["counts"]["notOnBoth"],
+    ) == ("ops", 12, 0)
+    assert iot["diff"] == ["io_threads"] and iot["fa"] != iot["fb"]
+    b = got["back"]["counts"]
+    assert (b["fail"], b["exceed"]) == (iot["counts"]["exceed"], iot["counts"]["fail"])
+    s = got["same"]["counts"]
+    assert (s["fail"], s["pass"], s["exceed"]) == (0, 12, 0)
+    a = got["apart"]["counts"]
+    assert a["fail"] + a["pass"] + a["exceed"] == 0 and a["notOnBoth"] == 12 + 115
 
 
 @node
 def test_single_run_shows_each_cells_median_and_the_run_fingerprint():
     q = {
-        "pr": "#s=set+commands&b=set-member-ttl&c=2605393f2&m=server_ops",
-        "ci": "#s=continuous&b=unstable&c=6c11c7fb2&m=ops",
+        "pr": f"#s=set+commands&run={PR_ID}&m=server_ops",
+        "ci": f"#s=continuous&run={CI9_ID}&m=ops",
     }
-    got = harness("single-run", q, SETS, CI)
+    got = harness("single-run", q, BASE, PR, CI1, CI9)
     pr, ci = got["pr"], got["ci"]
     assert pr["sections"] == [
         ["No TTLs", 115],
         ["With TTLs", 348],
         ["Expired but still stored", 220],
     ]
-    assert ci["sections"] == [[None, 24]]  # the continuous scenario defines no sections
-    sets = load(SETS)
+    assert ci["sections"] == [[None, 12]]  # the continuous scenario defines no sections
+    assert ci["label"].endswith("io-threads 9")
+    doc = load(PR)
     medians = {
-        (r["command"], r["shape"]["encoding"], r["shape"]["size"], r["mix"]): r["value"]
-        for r in sets["records"]
-        if r["build"]["sha"].startswith(PR)
+        (c["command"], c["shape"]["encoding"], c["shape"]["size"], c["mix"]): (
+            c["metrics"].get("server_ops") or {}
+        ).get("median")
+        for c in doc["cells"]
     }
     shown = {
         (row, shape.split(":")[1], int(shape.split(":")[2]), mix): v
         for row, shape, mix, v in pr["values"]
     }
     assert shown == medians
-    ci_doc = load(CI)
-    assert ci["fingerprint"] == ci_doc["fingerprints"][0]["hash"]
-    assert (
-        pr["fingerprint"]
-        == fingerprint.fingerprint(
-            r for r in sets["records"] if r["build"]["sha"].startswith(PR)
-        )["hash"]
-    )
+    assert pr["fingerprint"] == doc["run"]["fingerprint"]["hash"]
+    assert ci["fingerprint"] == load(CI9)["run"]["fingerprint"]["hash"]

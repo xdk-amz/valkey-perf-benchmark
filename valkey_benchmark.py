@@ -128,7 +128,7 @@ class ClientRunner:
         self.config_name = config_name
         self.module_commit = module_commit
         self.module_commit_timestamp = module_commit_timestamp
-        # Run facts for vpb-result.json (vpb_result.py): data_set, ref, config_path,
+        # Run facts for the run file (vpb_result.py): data_set, ref, config_path,
         # server_local, server_type, server_ssh. None writes no vpb-result file.
         self.result_info = result_info
         self.current_profiling_set = {"enabled": False}
@@ -453,10 +453,10 @@ class ClientRunner:
             try:
                 self._write_result_records(invocations, commit_time)
             except Exception:  # metrics.json is written; the records are extra
-                logging.exception("Could not write vpb-result records")
+                logging.exception("Could not write the run file")
 
     def _run_facts(self, sha: str) -> dict:
-        """The host, build and setup facts of this run for vpb-result.json, read now: the server's INFO and
+        """The host, build and setup facts of this run for its run file, read now: the server's INFO and
         CONFIG GET, the server's host (here, or over --server-ssh) and this client host.
         """
         info = self.result_info
@@ -469,7 +469,7 @@ class ClientRunner:
                 server_info = {**client.info("server"), **client.info("memory")}
                 config = vpb_result.config_get(client.config_get, set_keys)
         except Exception as e:
-            logging.warning(f"Could not read the server's INFO for vpb-result: {e}")
+            logging.warning(f"Could not read the server's INFO for the run file: {e}")
         local = bool(info.get("server_local"))
         ssh = info.get("server_ssh")
         run = (
@@ -484,39 +484,36 @@ class ClientRunner:
             peer=self.target_ip if local else None,
             instance_type=info.get("server_type"),
         )
-        client_host, _, client_why = vpb_result.collect_host(
+        client_host, _ = vpb_result.collect_host(
             vpb_result.local_run, pid=os.getpid(), peer=self.target_ip
         )
-        why = {**server["why"]}
-        why.update({f"host.client.{k}": v for k, v in client_why.items()})
-        if "instance_type" in client_why:
-            why["hardware.client"] = client_why["instance_type"]
         rc, out, _ = vpb_result.local_run(
             f"{shlex.quote(str(self.valkey_benchmark_path))} --version", 30
         )
-        generator = out.strip().splitlines()[0] if rc == 0 and out.strip() else None
-        if generator is None:
-            why["load_generator"] = "valkey-benchmark --version printed nothing"
-        client_cpus = (
-            self.cores or ",".join(self.client_cpu_ranges) or vpb_result.own_cpus()
-        )
+        served = config.get("io-threads")
+        io_threads = self.io_threads
+        if io_threads is None and str(served).isdigit():
+            io_threads = int(served)
         return {
             "server_host": server["host"],
             "client_host": client_host,
             "server_cpus": server["cpus"],
-            "client_cpus": client_cpus,
+            "client_cpus": self.cores
+            or ",".join(self.client_cpu_ranges)
+            or vpb_result.own_cpus(),
             "build_info": server["build_info"],
             "server_config": server["server_config"],
-            "load_generator": generator,
+            "load_generator": (
+                out.strip().splitlines()[0] if rc == 0 and out.strip() else None
+            ),
             "network_path": vpb_result.network_path(
                 local, vpb_result.loopback(self.target_ip), self.tls_mode
             ),
-            "io_threads": config.get("io-threads"),
-            "why": why,
+            "io_threads": io_threads,
         }
 
     def _write_result_records(self, invocations: list, commit_time: str) -> None:
-        """Write this run's invocations to results_dir/vpb-result.json (vpb_result.py)."""
+        """Write this run's invocations to its run file, results_dir/vpb-runs/<run id>.json (vpb_result.py)."""
         info = self.result_info
         sha = resolve_ref(self.commit_id, self.valkey_path)
         repository = (
@@ -524,17 +521,14 @@ class ClientRunner:
             or vpb_result.github_repo(self.valkey_path)
             or vpb_result.BUILD_REPO
         )
-        facts = self._run_facts(sha)
-        served = facts.pop("io_threads")
-        io_threads = self.io_threads
-        if io_threads is None and str(served).isdigit():
-            io_threads = int(served)
         rerun = []
         if not info.get("server_local"):
             rerun += ["--mode client --use-running-server --target-ip <server-ip>"]
         if self.module_commit:
             rerun += ["--module <module> --module-path <module .so>"]
-        ctx = vpb_result.run_context(
+        doc = vpb_result.benchmark_run(
+            self.config,
+            invocations,
             data_set=info.get("data_set") or "community",
             build={
                 "repo": repository,
@@ -544,13 +538,11 @@ class ClientRunner:
                 "sha": sha,
                 "time": commit_time,
             },
-            io_threads=io_threads,
-            config=vpb_result.config_for_rerun(self.config, info.get("config_path")),
+            config=vpb_result.harness_config(self.config, info.get("config_path")),
+            facts=self._run_facts(sha),
             rerun=" ".join(rerun),
-            facts=facts,
         )
-        doc = vpb_result.benchmark_records(self.config, invocations, ctx)
-        vpb_result.write(self.results_dir, doc)
+        vpb_result.write_run(self.results_dir, doc)
 
     def _get_effective_runs(self) -> int:
         """Return one run while profiling, otherwise the configured count."""

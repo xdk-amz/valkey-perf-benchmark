@@ -527,15 +527,16 @@ results/
 └── <commit-id>/
     ├── logs.txt                         # Benchmark logs
     ├── metrics.json                     # Performance metrics in JSON format
-    ├── vpb-result.json                  # The same runs as vpb-result/2 records, for the explorer
+    ├── vpb-runs/<run id>.json           # The same runs as vpb-result run files, for the explorer
     └── valkey_log_cluster_disabled.log  # Valkey server logs
 ```
 
-`vpb-result.json` holds one record per cell and metric with every run, and
-the same facts for every scenario: the build (version, settings, make
-arguments, binary sha256), the server's settings, and the server's and
-client's host (instance type, CPU, memory, NIC, virtualization, OS, kernel and
-its settings), read at run time (see `dashboards/explorer/SCHEMA.md`).
+`vpb-runs/` holds one file per run (one build on one setup with one config),
+each cell with every rep, and the same facts for every scenario: the build
+(version, settings, make arguments, binary sha256), the server's settings, and
+the server's and client's host (instance type, CPU, memory, NIC,
+virtualization, OS, kernel and its settings), read at run time (see
+`dashboards/explorer/SCHEMA.md`).
 `--data-set` and `--ref` name the data set and branch, `--server-ssh` lets
 `benchmark.py` read a remote server's host, and `--server-instance-type`
 gives its type when that host cannot.
@@ -633,7 +634,7 @@ The project includes a complete AWS infrastructure for visualizing benchmark res
 See `dashboards/README.md` for complete deployment guide and architecture details.
 
 `dashboards/explorer` builds static views (Single run, Compare) from the
-`vpb-result.json` files the runs write; see `dashboards/explorer/README.md`.
+run files the runs write in `vpb-runs/`; see `dashboards/explorer/README.md`.
 
 ## Utilities
 

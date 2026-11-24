@@ -34,8 +34,8 @@ rep the median PING round trip from every generator host must be at most
 than ``1 / rtt_flag_fraction`` round trips is flagged ``rtt_bound``.
 
 Results: ``<results-dir>/<run>/metrics.json`` (rows for the static dashboard
-and ``push_to_postgres.py``), ``vpb-result.json`` (the same reps as
-vpb-result/2 records, ``vpb_result.py``), ``summary.json`` (verdicts per cell),
+and ``push_to_postgres.py``), ``vpb-runs/<run id>.json`` (the same reps as
+vpb-result run files, one per build and fingerprint, ``vpb_result.py``), ``summary.json`` (verdicts per cell),
 ``cells.json`` and ``manifest.json``. A rerun with the same ``--run-name``
 skips reps already recorded. A file named STOP in the run directory stops
 the run between reps.
@@ -444,6 +444,7 @@ class Runner:
         self.manifest: Dict[str, Any] = {}
         # build label -> vpb_result.server_build(), read once per build from its server's INFO
         self.build_facts: Dict[str, Dict[str, Any]] = {}
+        self.run_files: set = set()
 
     # ---- helpers
     def conn(self) -> Conn:
@@ -654,7 +655,7 @@ class Runner:
 
     def server_facts(self, cell, label, sha, binary):
         """The build (once per label) and the CONFIG GET settings of the server just started, for
-        vpb-result.json."""
+        its run file."""
         keys = list((cell.get("server_config") or {}).keys())
         c = self.conn()
         try:
@@ -695,7 +696,7 @@ class Runner:
                     self.server_facts(cell, label, sha, binary)
                 )
             except (OSError, RuntimeError) as e:
-                logging.warning(f"server facts for vpb-result: {e}")
+                logging.warning(f"server facts for the run file: {e}")
             per_host = cell["connections"] // len(self.gen_hosts)
             threads = cell["client_threads"]
             results: Dict[str, Dict[str, Any]] = {}
@@ -813,12 +814,14 @@ class Runner:
         except (
             Exception
         ):  # noqa: BLE001 - metrics.json is written; the records are extra
-            logging.exception("Could not write vpb-result/2 records")
+            logging.exception("Could not write the run files")
 
     def write_records(self):
-        """vpb-result.json beside metrics.json, rewritten from every row so far."""
+        """The run files in vpb-runs/ beside metrics.json, rewritten from every row so far; a file this
+        runner wrote earlier that no run produces now (a fingerprint that changed) is removed.
+        """
         cells = self.cells()
-        doc = vpb_result.matrix_records(
+        docs = vpb_result.matrix_runs(
             self.cfg,
             cells,
             self.rows,
@@ -845,8 +848,10 @@ class Runner:
                 any(c["point"].get("tls") for c in cells),
             ),
         )
-        if doc["records"]:
-            vpb_result.write(self.out, doc, merge=False)
+        paths = {vpb_result.write_run(self.out, d, merge=False) for d in docs}
+        for stale in self.run_files - paths:
+            stale.unlink(missing_ok=True)
+        self.run_files = paths
 
     def done(self, cell_id, label, rep) -> bool:
         return any(
@@ -925,22 +930,18 @@ class Runner:
         return self.server.local and all(h.local for h in self.gen_hosts)
 
     def vpb_hosts(self) -> Dict[str, Any]:
-        """Every host's facts for vpb-result.json (vpb_result.HOST_SCRIPT, over ssh for remote hosts)."""
-        server, server_cpus, why = vpb_result.collect_host(
+        """Every host's facts for the run files (vpb_result.HOST_SCRIPT, over ssh for remote hosts)."""
+        server, server_cpus = vpb_result.collect_host(
             self.server.run, peer=self.target if self.same_host() else None
         )
         gens = [
             vpb_result.collect_host(h.run, peer=self.target) for h in self.gen_hosts
         ]
-        why = {f"host.server.{k}": v for k, v in why.items()}
-        for _, _, w in gens:
-            why.update({f"host.client.{k}": v for k, v in w.items()})
         return {
             "server": server,
             "server_cpus": server_cpus,
             "generators": [g[0] for g in gens],
             "generator_cpus": [g[1] for g in gens if g[1]],
-            "why": why,
         }
 
     def run(self) -> Dict[str, Any]:
@@ -1105,7 +1106,7 @@ def main() -> None:
     p.add_argument(
         "--repository",
         default=None,
-        help="owner/name the builds come from, for the vpb-result/2 records (default valkey-io/valkey)",
+        help="owner/name the builds come from, for the run files (default valkey-io/valkey)",
     )
     vpb_result.add_arguments(p, ref=False)
     add_arguments(p)

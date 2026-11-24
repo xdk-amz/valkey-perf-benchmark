@@ -1,37 +1,207 @@
 {
-  "schema": "vpb-fingerprint-fields/2",
-  "version": 4,
-  "result_schemas": ["vpb-result/1", "vpb-result/2"],
-  "fields": [
-    {"field": "repository", "group": "build", "source": "build.repo"},
-    {"field": "commit", "group": "build", "source": "build.sha"},
-    {"field": "build_version", "group": "build", "source": "build_info.version"},
-    {"field": "build_settings", "group": "build", "source": "build_info.settings"},
-    {"field": "build_args", "group": "build", "source": "build_info.args"},
-    {"field": "build_binary_sha256", "group": "build", "source": "build_info.binary_sha256"},
-    {"field": "server_config", "group": "scenario", "source": "server_config", "partial_source": ["io_threads"]},
-    {"field": "scenario_family", "group": "scenario", "source": "family"},
-    {"field": "scenario", "group": "scenario", "source": "scenario"},
-    {"field": "scenario_parameters", "group": "scenario", "source": "parameters", "partial_source": ["command", "command_line", "shape.type", "shape.encoding", "shape.size", "shape.size_unit", "mix", "pipeline", "clients", "workload"]},
-    {"field": "measurement", "group": "scenario", "source": "metric"},
-    {"field": "load_generator", "group": "load generator", "source": "load_generator"},
-    {"field": "network_path", "group": "load generator", "source": "network_path"},
-    {"field": "cpu_pinning", "group": "hardware", "source": "pinning", "partial_source": ["hardware.cores"]},
-    {"field": "instance_type", "group": "hardware", "source": "hardware.server"},
-    {"field": "cpu_model", "group": "hardware", "source": "host.server.cpu_model", "partial_source": ["hardware.arch"]},
-    {"field": "cpu_microcode", "group": "hardware", "source": "host.server.cpu_microcode"},
-    {"field": "cpu_topology", "group": "hardware", "source": "host.server.cpu_topology"},
-    {"field": "memory", "group": "hardware", "source": "host.server.memory"},
-    {"field": "nic", "group": "hardware", "source": "host.server.nic"},
-    {"field": "virtualization", "group": "hardware", "source": "host.server.virtualization"},
-    {"field": "cgroup_cpu_limit", "group": "hardware", "source": "host.server.cgroup_cpu_limit"},
-    {"field": "os", "group": "os", "source": "host.server.os"},
-    {"field": "kernel", "group": "os", "source": "host.server.kernel"},
-    {"field": "kernel_boot_options", "group": "os", "source": "host.server.kernel_boot_options"},
-    {"field": "kernel_runtime_settings", "group": "os", "source": "host.server.kernel_runtime_settings"},
-    {"field": "client_instance_type", "group": "load generator host", "source": "host.client.instance_type"},
-    {"field": "client_cpu_model", "group": "load generator host", "source": "host.client.cpu_model"},
-    {"field": "client_os", "group": "load generator host", "source": "host.client.os"},
-    {"field": "client_kernel", "group": "load generator host", "source": "host.client.kernel"}
-  ]
+ "schema": "vpb-fingerprint-fields/3",
+ "version": 5,
+ "result_schema": "vpb-result",
+ "fields": [
+  {
+   "field": "repository",
+   "group": "build",
+   "path": "build.repo"
+  },
+  {
+   "field": "commit",
+   "group": "build",
+   "path": "build.sha"
+  },
+  {
+   "field": "build_version",
+   "group": "build",
+   "path": "build.version"
+  },
+  {
+   "field": "build_settings",
+   "group": "build",
+   "path": "fingerprint.build.settings"
+  },
+  {
+   "field": "build_args",
+   "group": "build",
+   "path": "fingerprint.build.args"
+  },
+  {
+   "field": "build_binary_sha256",
+   "group": "build",
+   "path": "fingerprint.build.binary_sha256"
+  },
+  {
+   "field": "config",
+   "group": "scenario",
+   "path": "harness.config"
+  },
+  {
+   "field": "config_inline",
+   "group": "scenario",
+   "path": "harness.config_inline"
+  },
+  {
+   "field": "server_config",
+   "group": "scenario",
+   "path": "fingerprint.server_config"
+  },
+  {
+   "field": "io_threads",
+   "group": "scenario",
+   "path": "fingerprint.io_threads"
+  },
+  {
+   "field": "load_generator",
+   "group": "load generator",
+   "path": "fingerprint.load_generator"
+  },
+  {
+   "field": "network_path",
+   "group": "load generator",
+   "path": "fingerprint.network_path"
+  },
+  {
+   "field": "cpu_pinning",
+   "group": "hardware",
+   "path": "fingerprint.pinning"
+  },
+  {
+   "field": "cores",
+   "group": "hardware",
+   "path": "fingerprint.cores"
+  },
+  {
+   "field": "instance_type",
+   "group": "server host",
+   "path": "fingerprint.server.instance_type"
+  },
+  {
+   "field": "arch",
+   "group": "server host",
+   "path": "fingerprint.server.arch"
+  },
+  {
+   "field": "cpu_model",
+   "group": "server host",
+   "path": "fingerprint.server.cpu_model"
+  },
+  {
+   "field": "cpu_microcode",
+   "group": "server host",
+   "path": "fingerprint.server.cpu_microcode"
+  },
+  {
+   "field": "cpu_topology",
+   "group": "server host",
+   "path": "fingerprint.server.cpu_topology"
+  },
+  {
+   "field": "memory",
+   "group": "server host",
+   "path": "fingerprint.server.memory"
+  },
+  {
+   "field": "nic",
+   "group": "server host",
+   "path": "fingerprint.server.nic"
+  },
+  {
+   "field": "virtualization",
+   "group": "server host",
+   "path": "fingerprint.server.virtualization"
+  },
+  {
+   "field": "cgroup_cpu_limit",
+   "group": "server host",
+   "path": "fingerprint.server.cgroup_cpu_limit"
+  },
+  {
+   "field": "os",
+   "group": "server host",
+   "path": "fingerprint.server.os"
+  },
+  {
+   "field": "kernel",
+   "group": "server host",
+   "path": "fingerprint.server.kernel"
+  },
+  {
+   "field": "kernel_boot_options",
+   "group": "server host",
+   "path": "fingerprint.server.kernel_boot_options"
+  },
+  {
+   "field": "kernel_runtime_settings",
+   "group": "server host",
+   "path": "fingerprint.server.kernel_runtime_settings"
+  },
+  {
+   "field": "client_instance_type",
+   "group": "client host",
+   "path": "fingerprint.client.instance_type"
+  },
+  {
+   "field": "client_arch",
+   "group": "client host",
+   "path": "fingerprint.client.arch"
+  },
+  {
+   "field": "client_cpu_model",
+   "group": "client host",
+   "path": "fingerprint.client.cpu_model"
+  },
+  {
+   "field": "client_cpu_microcode",
+   "group": "client host",
+   "path": "fingerprint.client.cpu_microcode"
+  },
+  {
+   "field": "client_cpu_topology",
+   "group": "client host",
+   "path": "fingerprint.client.cpu_topology"
+  },
+  {
+   "field": "client_memory",
+   "group": "client host",
+   "path": "fingerprint.client.memory"
+  },
+  {
+   "field": "client_nic",
+   "group": "client host",
+   "path": "fingerprint.client.nic"
+  },
+  {
+   "field": "client_virtualization",
+   "group": "client host",
+   "path": "fingerprint.client.virtualization"
+  },
+  {
+   "field": "client_cgroup_cpu_limit",
+   "group": "client host",
+   "path": "fingerprint.client.cgroup_cpu_limit"
+  },
+  {
+   "field": "client_os",
+   "group": "client host",
+   "path": "fingerprint.client.os"
+  },
+  {
+   "field": "client_kernel",
+   "group": "client host",
+   "path": "fingerprint.client.kernel"
+  },
+  {
+   "field": "client_kernel_boot_options",
+   "group": "client host",
+   "path": "fingerprint.client.kernel_boot_options"
+  },
+  {
+   "field": "client_kernel_runtime_settings",
+   "group": "client host",
+   "path": "fingerprint.client.kernel_runtime_settings"
+  }
+ ]
 }

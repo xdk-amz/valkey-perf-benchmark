@@ -1,50 +1,46 @@
-/* Template: Compare. Series B against series A of one scenario, cell by cell (TEMPLATES.md).
-   A series is (scenario, branch, commit, slice); the slice is one value of the dimension the scenario declares as
-   variable (sliceOf). Cells match on every other dimension, so the slice is left out of the match key. */
+/* Template: Compare. Series B against series A, cell by cell (TEMPLATES.md).
+   A series is a run file and, when the run's scenario declares a variable dimension (sliceOf), one value of it:
+   the slice. Cells match on their scenario and their cell id with the slice left out, so any two run files
+   compare; cells only one series has are listed once. */
 "use strict";
 
 let S = null;
 let lastHash = "";
 
-const slicesOf = (s, br, c) => {
-  const sl = sliceOf(s);
+const familyOf = (id) => (entry(id) ? entry(id).families[0] : null);
+const slicesOf = (id) => {
+  const sl = sliceOf(familyOf(id));
   if (!sl) return [];
-  const vs = new Set(DATA.records.filter((r) => r.family === s && r.build.ref === br && sha9(r) === c).map((r) => r[sl.dim]));
-  return [...vs].sort((a, b) => sl.order.indexOf(a) - sl.order.indexOf(b));
+  return [...entry(id).mixes].sort((a, b) => sl.order.indexOf(a) - sl.order.indexOf(b));
 };
-// A is unstable's newest commit when another branch exists, else the commit before B on B's branch
-function defaults(s) {
-  const bs = branches(s);
-  const b = { br: bs[0], c: commits(s, bs[0])[0] };
-  if (bs.includes("unstable") && b.br !== "unstable") return { a: { br: "unstable", c: commits(s, "unstable")[0] }, b };
-  const cs = commits(s, b.br);
-  return { a: { br: b.br, c: cs[1] || cs[0] }, b };
+// B is the newest run of the first scenario off unstable; A is an unstable run of the same scenario, else another
+function defaults() {
+  const rs = runsOf(families()[0]);
+  const b = rs.find((r) => r.build.ref !== "unstable") || rs[0];
+  const a = rs.find((r) => r.build.ref === "unstable" && r.id !== b.id) || rs.find((r) => r.id !== b.id) || b;
+  return { a: a.id, b: b.id };
 }
 function parseHash(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, ""));
-  const ss = scenarios();
-  const s = ss.includes(q.get("s")) ? q.get("s") : ss[0];
-  const d = defaults(s);
-  const side = (bk, ck, lk, def, slDefault) => {
-    const br = branches(s).includes(q.get(bk)) ? q.get(bk) : def.br;
-    const c = commits(s, br).includes(q.get(ck)) ? q.get(ck) : br === def.br ? def.c : commits(s, br)[0];
-    const sls = slicesOf(s, br, c);
+  const d = defaults();
+  const side = (rk, lk, def, slDefault) => {
+    const r = entry(q.get(rk)) ? q.get(rk) : def;
+    const sls = slicesOf(r);
     const sl = !sls.length ? null : sls.includes(q.get(lk)) ? q.get(lk) : sls.includes(slDefault) ? slDefault : sls[0];
-    return { br, c, sl };
+    return { r, sl };
   };
-  const a = side("ab", "ac", "al", d.a, "none");
-  const b = side("bb", "bc", "bl", d.b, a.sl); // B's slice defaults to A's
+  const a = side("a", "al", d.a, "none");
+  const b = side("b", "bl", d.b, a.sl); // B's slice defaults to A's
   const cell = /^[0-9a-f]{8}$/.test(q.get("cell") || "") ? q.get("cell") : "";
-  const [r0, a0] = DATA.metrics[throughputMetric(s)].bar;
-  const num = (k, d) => { const v = Number(q.get(k)); return q.has(k) && Number.isFinite(v) && v >= 0 ? v : d; };
-  return { s, a, b, bar: [num("rel", r0), num("abs", a0)], cell };
+  const num = (k) => { const v = Number(q.get(k)); return q.has(k) && Number.isFinite(v) && v >= 0 ? v : null; };
+  return { a, b, bar: [num("rel"), num("abs")], cell };
 }
 function toHash(st) {
-  const q = new URLSearchParams({ s: st.s, ab: st.a.br, ac: st.a.c });
+  const q = new URLSearchParams({ a: st.a.r });
   if (st.a.sl) q.set("al", st.a.sl);
-  q.set("bb", st.b.br); q.set("bc", st.b.c);
+  q.set("b", st.b.r);
   if (st.b.sl) q.set("bl", st.b.sl);
-  if (st.bar) { q.set("rel", st.bar[0]); q.set("abs", st.bar[1]); }
+  if (st.bar && st.bar[0] != null) { q.set("rel", st.bar[0]); q.set("abs", st.bar[1]); }
   if (st.cell) q.set("cell", st.cell);
   return "#" + q.toString();
 }
@@ -55,28 +51,30 @@ function commit() {
 }
 
 // ---------- cells and the comparison ----------
-const throughputMetric = (s) => (DATA.records.some((r) => r.family === s && r.metric === "server_ops") ? "server_ops" : "ops");
-const seriesRecs = (side) => {
-  const sl = sliceOf(S.s);
-  return DATA.records.filter((r) => r.family === S.s && r.build.ref === side.br && sha9(r) === side.c && (!sl || r[sl.dim] === side.sl));
+const throughputMetric = (docs) => (docs.some((d) => d.cells.some((c) => c.metrics.server_ops)) ? "server_ops" : "ops");
+// a cell id with the slice value blanked wherever it is a segment (the set scenarios' ids carry the mix)
+const unslice = (id, sl) => (sl ? id.split(".").map((x) => (x === sl ? "*" : x)).join(".") : id);
+const seriesCells = (doc, side) => {
+  const fam = familyOf(side.r), sl = sliceOf(fam);
+  return doc.cells.filter((c) => c.family === fam && (!sl || c[sl.dim] === side.sl));
 };
 
-function cellsOf() {
-  const recs = { a: seriesRecs(S.a), b: seriesRecs(S.b) };
-  const all = [...recs.a, ...recs.b];
+function cellsOf(docA, docB) {
+  const cs = { a: seriesCells(docA, S.a), b: seriesCells(docB, S.b) };
+  const all = [...cs.a, ...cs.b];
   const varying = ROW_DIMS.filter(([, , get]) => new Set(all.map(get)).size > 1);
-  const rowOf = (r) => [r.command, ...varying.map(([, name, get]) => (name ? `${name} ${get(r)}` : String(get(r))))].join(" · ");
+  const rowOf = (c) => [c.command, ...varying.map(([, name, get]) => `${name} ${get(c)}`)].join(" · ");
   const cells = new Map();
   for (const side of ["a", "b"]) {
-    for (const r of recs[side]) {
-      const key = [rowOf(r), shapeKey(r)].join("\u0001");
-      let c = cells.get(key);
-      if (!c) { c = { key, hash: fnv(key), row: rowOf(r), shape: shapeKey(r), a: null, b: null }; cells.set(key, c); }
-      c[side] = c[side] || {};
-      c[side][r.metric] = r;
+    for (const c of cs[side]) {
+      const key = `${c.family}\u0001${unslice(c.id, S[side].sl)}`;
+      let x = cells.get(key);
+      if (!x) { x = { key, hash: fnv(key), row: rowOf(c), shape: shapeKey(c), a: null, b: null, ca: null, cb: null }; cells.set(key, x); }
+      x[side] = cellView(c);
+      x[`c${side}`] = c;
     }
   }
-  return { recs, cells };
+  return cells;
 }
 
 // B against A for one metric: paired runs when they share pair ids, else the medians with non-overlapping ranges
@@ -118,7 +116,6 @@ function nsText(v) {
   const s = a >= 1e6 ? `${(a / 1e6).toFixed(2)} ms` : a >= 1e3 ? `${(a / 1e3).toFixed(1)} µs` : `${a.toFixed(0)} ns`;
   return `${v >= 0 ? "+" : "\u2212"}${s}`;
 }
-const runLabel = (side) => `${side.br} ${side.c}`;
 const STATUS_TEXT = { slower: "Fail", faster: "Exceed", pass: "Pass",
   onlyB: "no run on A", onlyA: "no run on B", missing: "missing" };
 
@@ -229,33 +226,24 @@ function notOnBoth(cells) {
       b.length ? h("tr", {}, h("th", { scope: "row" }, `Only on B (${b.length})`), h("td", {}, b.join(", "))) : null)));
 }
 
-const seriesLabel = (side) => [side.br, side.c, side.sl && sliceOf(S.s).label(side.sl)].filter(Boolean).join(" ");
-// a record with the slice value blanked wherever it names the slice (the scenario id carries the mix as a segment)
-function unslice(r, sl) {
-  if (!sl) return r;
-  const seg = (v) => (typeof v === "string" ? v.split(".").map((x) => (x === sl ? "*" : x)).join(".") : v);
-  return { ...r, scenario: seg(r.scenario), [sliceOf(S.s).dim]: "*" };
-}
-function header(recs, cells) {
-  const id = (side, rs) => {
-    const r = rs[0];
-    if (!r) return `${side}: ${seriesLabel(S[side.toLowerCase()])}`;
-    const sd = S[side.toLowerCase()];
-    return [`${side}: `, h("a", { href: `https://github.com/${r.build.repo}/tree/${r.build.ref}` }, `${r.build.repo} ${r.build.ref}`), " ",
-      h("a", { href: `https://github.com/${r.build.repo}/commit/${r.build.sha}`, class: "mono" }, r.build.sha.slice(0, 9)),
-      sd.sl ? ` · ${sliceOf(S.s).label(sd.sl)}` : ""];
+const seriesLabel = (side) => {
+  const e = entry(side.r);
+  return [familyOf(side.r), runLabel(e), side.sl && sliceOf(familyOf(side.r)).label(side.sl)].filter(Boolean).join(" · ");
+};
+function header(docA, docB) {
+  const id = (name, doc, sd) => {
+    const b = doc.run.build;
+    return [`${name}: `, h("a", { href: `https://github.com/${b.repo}/tree/${b.ref}` }, `${b.repo} ${b.ref}`), " ",
+      h("a", { href: `https://github.com/${b.repo}/commit/${b.sha}`, class: "mono" }, b.sha.slice(0, 9)),
+      sd.sl ? ` · ${sliceOf(familyOf(sd.r)).label(sd.sl)}` : "", ` · run ${doc.run.id}`];
   };
-  const fa = fingerprint(recs.a), fb = fingerprint(recs.b);
-  // match check: over the cells on both sides, with each side's slice blanked, so a differing slice is named once
-  const both = [...cells.values()].filter(onBoth);
-  const ca = fingerprint(both.flatMap((c) => Object.values(c.a)).map((r) => unslice(r, S.a.sl)));
-  const cb = fingerprint(both.flatMap((c) => Object.values(c.b)).map((r) => unslice(r, S.b.sl)));
-  // the binary and its version follow the commit; a differing slice also changes the scenario's parameters
+  const fa = fingerprint(docA.run), fb = fingerprint(docB.run);
+  // the binary and its version follow the commit
+  const diff = fingerprintDiff(fa, fb, ["repository", "commit", "build_version", "build_binary_sha256"]);
   const sliced = S.a.sl !== S.b.sl;
-  const diff = fingerprintDiff(ca, cb, ["repository", "commit", "build_version", "build_binary_sha256", ...(sliced ? ["scenario_parameters"] : [])]);
-  const same = ["repository", "commit", ...(sliced ? [sliceOf(S.s).name] : [])];
+  const same = ["repository", "commit", ...(sliced ? [sliceOf(familyOf(S.a.r)).name] : [])];
   const sameText = same.length > 2 ? `${same.slice(0, -1).join(", ")} and ${same[same.length - 1]}` : same.join(" and ");
-  return [h("p", { class: "ids" }, `${S.s} · `, id("A", recs.a), " · ", id("B", recs.b)),
+  return [h("p", { class: "ids" }, id("A", docA, S.a), " · ", id("B", docB, S.b)),
     fingerprintLine(fa, "A Benchmark Fingerprint"), fingerprintLine(fb, "B Benchmark Fingerprint"),
     h("p", { class: "fp-match" }, diff.length
       ? `Fingerprints differ beyond ${sameText}: ${diff.map(fieldName).join(", ")}`
@@ -263,29 +251,28 @@ function header(recs, cells) {
 }
 
 // ---------- cell detail ----------
-function renderCell(cells, m, cell) {
+function renderCell(docs, m, cell) {
   const back = h("button", { type: "button", class: "back", onclick: () => { S.cell = ""; commit(); } }, "\u2190 Back to the comparison");
   if (!cell) return [back, h("p", {}, "This cell is not in the selected series.")];
   const j = judge(cell.a && cell.a[m], cell.b && cell.b[m], m);
   const unit = DATA.metrics[m].unit;
-  const any = (cell.b || cell.a)[m] || Object.values(cell.b || cell.a)[0];
-  const side = (name, st, by) => {
+  const any = cell.cb || cell.ca;
+  const side = (name, st, by, c, doc) => {
     if (!by) return h("div", { class: "side" }, h("h3", {}, `${name}: ${seriesLabel(st)}`), h("p", { class: "note" }, "not on this series"));
     const ms = METRIC_ORDER.filter((x) => by[x]);
-    const rec = by[m] || by[ms[0]];
     return h("div", { class: "side" },
       h("h3", {}, `${name}: ${seriesLabel(st)}`),
-      h("p", { class: "note mono" }, rec.scenario),
-      strip(rec),
-      runsTable({ by }, ms),
+      h("p", { class: "note mono" }, c.id),
+      strip(by[m] || by[ms[0]]),
+      runsTable(c, ms),
       h("h3", { style: "margin-top: 16px" }, `Rerun ${name}`),
-      reproBlock(DATA.reproduce[rec.reproduce], rec));
+      reproBlock(doc.run));
   };
   return [h("section", { class: "block", id: "cell" },
     back,
     h("h2", { style: "margin-top: 12px" }, [panelName(cell.row), shapeLabel(cell.shape)].join(" · ")),
     h("dl", { class: "kv" }, [
-      ["Scenario", S.s], ["A", seriesLabel(S.a)], ["B", seriesLabel(S.b)], ["Command sent", any.command_line || "not recorded"],
+      ["Scenario", any.family], ["A", seriesLabel(S.a)], ["B", seriesLabel(S.b)], ["Command sent", any.command_line || "not recorded"],
     ].map(([k, v]) => [h("dt", {}, k), h("dd", {}, String(v))])),
     h("table", {},
       h("thead", {}, h("tr", {}, [mlabel(m), "A", "B", "Change", "Per call", "Pairs", "Verdict"].map((x, i) => h("th", { scope: "col", class: i && i < 5 ? "num" : "" }, x)))),
@@ -299,7 +286,7 @@ function renderCell(cells, m, cell) {
       h("table", {}, h("thead", {}, h("tr", {}, ["Pair", "A", "B", "Change"].map((x, i) => h("th", { scope: "col", class: i ? "num" : "" }, x)))),
         h("tbody", {}, j.pairs.map((p) => h("tr", {}, h("th", { scope: "row" }, p.p), h("td", { class: "num" }, compact(p.a, unit)),
           h("td", { class: "num" }, compact(p.b, unit)), h("td", { class: "num" }, pctText(100 * (p.b / p.a - 1)))))))) : null,
-    h("div", { class: "sides" }, side("A", S.a, cell.a), side("B", S.b, cell.b)))];
+    h("div", { class: "sides" }, side("A", S.a, cell.a, cell.ca, docs[0]), side("B", S.b, cell.b, cell.cb, docs[1])))];
 }
 
 // ---------- render ----------
@@ -309,36 +296,40 @@ function renderSelectors() {
     el.replaceChildren(...values.map((v) => h("option", { value: v }, lab(v))));
     el.value = cur;
   };
-  const commitLabel = (br) => (v) => { const t = CAT.get(S.s).get(br).get(v).time; return t ? `${v} · ${t.slice(0, 10)}` : v; };
-  const sl = sliceOf(S.s);
   const [ir, ia] = [document.getElementById("bar-rel"), document.getElementById("bar-abs")];
   if (document.activeElement !== ir) ir.value = S.bar[0];
   if (document.activeElement !== ia) ia.value = S.bar[1];
-  fill("sel-scenario", scenarios(), S.s, (v) => v);
+  const all = families().flatMap((f) => runsOf(f).filter((r) => r.families[0] === f)).map((r) => r.id);
   for (const k of ["a", "b"]) {
-    fill(`sel-${k}-branch`, branches(S.s), S[k].br, (v) => `${v} (${latest(S.s, v).repo})`);
-    fill(`sel-${k}-commit`, commits(S.s, S[k].br), S[k].c, commitLabel(S[k].br));
+    fill(`sel-${k}-run`, all, S[k].r, (v) => `${familyOf(v)} · ${runLabel(entry(v))}`);
+    const sl = sliceOf(familyOf(S[k].r));
     const box = document.getElementById(`sel-${k}-slice`);
     box.closest("label").hidden = !sl;
     if (sl) {
-      fill(`sel-${k}-slice`, slicesOf(S.s, S[k].br, S[k].c), S[k].sl, sl.label);
+      fill(`sel-${k}-slice`, slicesOf(S[k].r), S[k].sl, sl.label);
       box.previousElementSibling.textContent = `${k.toUpperCase()} ${sl.name}`;
     }
   }
 }
 
-function render() {
+// the comparison of the selected series: both run files, the metric, the matched cells
+async function compareState() {
+  const docs = await Promise.all([getRun(S.a.r), getRun(S.b.r)]);
+  const m = throughputMetric(docs);
+  if (S.bar[0] == null) S.bar = DATA.metrics[m].bar.slice(0, 2);
+  return { docs, m, cells: cellsOf(docs[0], docs[1]) };
+}
+
+async function render() {
+  const { docs, m, cells } = await compareState();
   renderSelectors();
-  const m = throughputMetric(S.s);
-  const { recs, cells } = cellsOf();
   closeDrawer();
   const out = document.getElementById("out");
-  if (S.cell) out.replaceChildren(...renderCell(cells, m, [...cells.values()].find((c) => c.hash === S.cell)).filter(Boolean));
-  else out.replaceChildren(...[h("section", { class: "block", id: "summary" }, header(recs, cells)), tally(cells, m), panels(cells, m), notOnBoth(cells)].filter(Boolean));
+  if (S.cell) out.replaceChildren(...renderCell(docs, m, [...cells.values()].find((c) => c.hash === S.cell)).filter(Boolean));
+  else out.replaceChildren(...[h("section", { class: "block", id: "summary" }, header(docs[0], docs[1])), tally(cells, m), panels(cells, m), notOnBoth(cells)].filter(Boolean));
 }
 
 function wire() {
-  document.getElementById("sel-scenario").addEventListener("change", (e) => { S = parseHash(toHash({ s: e.target.value, a: {}, b: {}, bar: S.bar })); commit(); });
   for (const [id, i] of [["bar-rel", 0], ["bar-abs", 1]]) {
     document.getElementById(id).addEventListener("input", (e) => {
       const v = Number(e.target.value);
@@ -348,14 +339,9 @@ function wire() {
     });
   }
   for (const k of ["a", "b"]) {
-    const keep = (br, c) => { const sls = slicesOf(S.s, br, c); return sls.includes(S[k].sl) ? S[k].sl : sls[0] || null; };
-    document.getElementById(`sel-${k}-branch`).addEventListener("change", (e) => {
-      const br = e.target.value, c = commits(S.s, br)[0];
-      S[k] = { br, c, sl: keep(br, c) }; S.cell = ""; commit();
-    });
-    document.getElementById(`sel-${k}-commit`).addEventListener("change", (e) => {
-      const c = e.target.value;
-      S[k] = { br: S[k].br, c, sl: keep(S[k].br, c) }; S.cell = ""; commit();
+    document.getElementById(`sel-${k}-run`).addEventListener("change", (e) => {
+      const r = e.target.value, sls = slicesOf(r);
+      S[k] = { r, sl: sls.includes(S[k].sl) ? S[k].sl : sls.includes("none") ? "none" : sls[0] || null }; S.cell = ""; commit();
     });
     document.getElementById(`sel-${k}-slice`).addEventListener("change", (e) => { S[k] = { ...S[k], sl: e.target.value }; S.cell = ""; commit(); });
   }
@@ -367,12 +353,12 @@ function wire() {
   });
 }
 
-start(() => {
+start(async () => {
   S = parseHash(location.hash);
-  // the URL always carries the full state, the bar included, so a copied link keeps it
+  await compareState(); // sets the default bar, so the URL always carries the full state and a copied link keeps it
   lastHash = toHash(S);
   if (location.hash !== lastHash) history.replaceState(null, "", lastHash);
-  document.getElementById("meta").textContent = `${DATA.records.length.toLocaleString("en-US")} results · ${scenarios().length} scenarios`;
+  document.getElementById("meta").textContent = `${DATA.runs.length} runs · ${families().length} scenarios`;
   wire();
-  render();
+  return render();
 });
