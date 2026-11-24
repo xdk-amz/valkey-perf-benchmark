@@ -353,9 +353,12 @@ async function render() {
   closeDrawer();
   const out = document.getElementById("out");
   if (S.cell) out.replaceChildren(...renderCell(docs, m, [...cells.values()].find((c) => c.hash === S.cell)).filter(Boolean));
-  else out.replaceChildren(...[h("section", { class: "block", id: "summary" }, header(docs[0], docs[1])),
-    tabBar(S.m, (tab) => { S.m = tab; S.bar = [null, null]; S.cell = ""; commit(); }),
-    tally(cells, m), panels(cells, m), notOnBoth(cells)].filter(Boolean));
+  // the top: the comparison's title and the metric tabs; both runs' identity and fingerprints close the page
+  else out.replaceChildren(...[h("section", { class: "block", id: "summary" },
+    h("h2", { class: "run-title" }, `${seriesLabel(S.a)} vs ${seriesLabel(S.b)}`),
+    tabBar(S.m, (tab) => { S.m = tab; S.bar = [null, null]; S.cell = ""; commit(); })),
+    tally(cells, m), panels(cells, m), notOnBoth(cells),
+    h("section", { class: "block", id: "fingerprint" }, h("h2", {}, "Fingerprint"), header(docs[0], docs[1]))].filter(Boolean));
 }
 
 function wire() {

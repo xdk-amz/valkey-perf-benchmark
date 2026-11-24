@@ -68,19 +68,6 @@ function runHeader(run) {
   ];
 }
 
-function coverage(run) {
-  const m = run.m;
-  const secs = sectionsOf(S.s);
-  const rows = secs.map((sec) => {
-    const cs = [...run.cells.values()].filter((c) => sec.test(c.mix) && c.by[m]);
-    return cs.length ? [sec, cs.filter((c) => c.by[m].value != null).length, cs.filter((c) => c.by[m].value == null).length] : null;
-  }).filter(Boolean);
-  return h("table", { class: "coverage" },
-    h("thead", {}, h("tr", {}, h("th", { scope: "col" }, secs[0].title ? "Section" : "Scenario"), h("th", { scope: "col", class: "num" }, "Cells measured"), h("th", { scope: "col", class: "num" }, "Missing"))),
-    h("tbody", {}, rows.map(([sec, a, b]) => h("tr", {}, h("th", { scope: "row" }, h("a", { href: `#sec-${sec.id}`, target: "_self", onclick: jump }, sec.title || S.s)),
-      h("td", { class: "num" }, a), h("td", { class: "num" }, b)))));
-}
-
 function sectionTables(run, sec) {
   const cs = [...run.cells.values()].filter((c) => sec.test(c.mix));
   if (!cs.length) return null;
@@ -245,12 +232,12 @@ function renderRun(run) {
   appendix.addEventListener("toggle", () => {
     if (appendix.open && appendix.childElementCount === 1) appendix.append(...sectionsOf(S.s).map((sec) => sectionTables(run, sec)).filter(Boolean));
   });
-  const tabs = tabBar(S.m, (tab) => { S.m = tab; S.cell = ""; commit(); });
-  if (![...run.cells.values()].some((c) => c.by[run.m])) {
-    return [h("section", { class: "block", id: "run" }, runHeader(run), tabs, h("p", { class: "note" }, "no data")), appendix];
-  }
-  return [h("section", { class: "block", id: "run" }, runHeader(run), tabs, coverage(run)),
-    ...sectionsOf(S.s).map((sec) => sectionPanels(run, sec, run.m)), appendix];
+  // the top: the run's title and the metric tabs; the run's identity and fingerprint close the page
+  const top = h("section", { class: "block", id: "run" }, h("h2", { class: "run-title" }, `${S.s} · ${runLabel(entry(S.r))}`),
+    tabBar(S.m, (tab) => { S.m = tab; S.cell = ""; commit(); }));
+  const fp = h("section", { class: "block", id: "fingerprint" }, h("h2", {}, "Fingerprint"), runHeader(run));
+  if (![...run.cells.values()].some((c) => c.by[run.m])) return [top, h("p", { class: "note" }, "no data"), appendix, fp];
+  return [top, ...sectionsOf(S.s).map((sec) => sectionPanels(run, sec, run.m)), appendix, fp];
 }
 
 // ---------- cell detail ----------

@@ -171,12 +171,6 @@ function runLabel(e) {
   const diff = keys.filter(([k]) => twins.some((t) => t.fingerprint[k] !== e.fingerprint[k])).map(([k, n]) => `${n} ${e.fingerprint[k] ?? "not recorded"}`.trim());
   return `${base} · ${diff.length ? diff.join(", ") : e.fingerprint.hash.slice(0, 8)}`;
 }
-function jump(e) {
-  e.preventDefault();
-  const id = e.currentTarget.getAttribute("href").slice(1);
-  const el = document.getElementById(id);
-  if (el) el.scrollIntoView();
-}
 
 // The view of one cell: per metric its summary and the reps' values, the shape the panels and verdicts read.
 function cellView(cell) {
@@ -344,7 +338,8 @@ function openDrawer(fp, title) {
   const d = document.getElementById("drawer");
   const groups = [...new Set(fp.fields.map((f) => f.group))];
   const missing = fp.fields.filter((f) => f.value === undefined);
-  d.replaceChildren(
+  // replaceChildren takes nodes, not arrays of them: flatten the groups first
+  d.replaceChildren(...[
     h("div", { class: "drawer-head" }, h("h2", {}, title),
       h("button", { type: "button", class: "copy", onclick: closeDrawer, "aria-label": "Close" }, "Close")),
     h("p", {}, h("code", { class: "fp-full" }, fp.hash)),
@@ -353,7 +348,7 @@ function openDrawer(fp, title) {
       return rows.length ? [h("h3", {}, g[0].toUpperCase() + g.slice(1)), fieldsTable(rows)] : null;
     }),
     missing.length ? [h("h3", {}, "Not recorded"), h("p", { class: "note" }, missing.map((f) => fieldName(f.field)).join(", "))] : null,
-    h("h3", {}, "Hashed JSON"), h("pre", { class: "mono raw fp-json" }, canonical(Object.fromEntries(fp.fields.map((f) => [f.field, f.value ?? null])))));
+    h("h3", {}, "Hashed JSON"), h("pre", { class: "mono raw fp-json" }, canonical(Object.fromEntries(fp.fields.map((f) => [f.field, f.value ?? null]))))].flat(Infinity).filter(Boolean));
   d.hidden = false;
   d.querySelector("button").focus();
 }
