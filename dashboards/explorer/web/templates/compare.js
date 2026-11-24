@@ -240,8 +240,9 @@ function header(docA, docB) {
   const fa = fingerprint(docA.run), fb = fingerprint(docB.run);
   // the binary and its version follow the commit
   const diff = fingerprintDiff(fa, fb, ["repository", "commit", "build_version", "build_binary_sha256"]);
-  const sliced = S.a.sl !== S.b.sl;
-  const same = ["repository", "commit", ...(sliced ? [sliceOf(familyOf(S.a.r)).name] : [])];
+  // a differing slice is named once; a scenario without slices has none to name
+  const sl = sliceOf(familyOf(S.a.r)) || sliceOf(familyOf(S.b.r));
+  const same = ["repository", "commit", ...(sl && S.a.sl !== S.b.sl ? [sl.name] : [])];
   const sameText = same.length > 2 ? `${same.slice(0, -1).join(", ")} and ${same[same.length - 1]}` : same.join(" and ");
   return [h("p", { class: "ids" }, id("A", docA, S.a), " · ", id("B", docB, S.b)),
     fingerprintLine(fa, "A Benchmark Fingerprint"), fingerprintLine(fb, "B Benchmark Fingerprint"),
@@ -304,7 +305,7 @@ function renderSelectors() {
     fill(`sel-${k}-run`, all, S[k].r, (v) => `${familyOf(v)} · ${runLabel(entry(v))}`);
     const sl = sliceOf(familyOf(S[k].r));
     const box = document.getElementById(`sel-${k}-slice`);
-    box.closest("label").hidden = !sl;
+    box.closest("label").style.display = sl ? "" : "none";
     if (sl) {
       fill(`sel-${k}-slice`, slicesOf(S[k].r), S[k].sl, sl.label);
       box.previousElementSibling.textContent = `${k.toUpperCase()} ${sl.name}`;
