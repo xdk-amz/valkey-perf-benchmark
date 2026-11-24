@@ -162,3 +162,11 @@ table.fptable td { overflow-wrap: anywhere; }
 .nr { color: var(--mute); font-style: italic; }
 .partial { color: var(--mute); }
 pre.fp-json { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14rem; overflow-y: auto; }
+
+/* metric tabs, above the totals (Compare) and the coverage table (Single run) */
+.tabs { display: flex; gap: var(--s5); border-bottom: 1px solid var(--hair); margin: var(--s4) 0 var(--s3); }
+.tabs .tab { background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: var(--s1) 0;
+  color: var(--ink-2); cursor: pointer; }
+.tabs .tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+.tabs .tab:hover { color: var(--ink); }
+.tabs .tab:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

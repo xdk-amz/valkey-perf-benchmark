@@ -13,11 +13,10 @@ function parseHash(hash) {
   const rs = runsOf(s).map((r) => r.id);
   const r = rs.includes(q.get("run")) ? q.get("run") : rs[0];
   const cell = /^[0-9a-f]{8}$/.test(q.get("cell") || "") ? q.get("cell") : "";
-  return { s, r, m: q.get("m") || "", cell };
+  return { s, r, m: parseTab(q), cell };
 }
 function toHash(st) {
-  const q = new URLSearchParams({ s: st.s, run: st.r });
-  if (st.m) q.set("m", st.m);
+  const q = new URLSearchParams({ s: st.s, run: st.r, m: st.m || "tps" });
   if (st.cell) q.set("cell", st.cell);
   return "#" + q.toString();
 }
@@ -43,7 +42,7 @@ function runOf(doc) {
   }
   const metrics = METRIC_ORDER.filter((m) => cs.some((c) => c.metrics[m]));
   const shown = metrics.includes("server_ops") ? metrics.filter((m) => m !== "ops") : metrics;
-  return { doc, run: doc.run, cells, metrics, shown, varying };
+  return { doc, run: doc.run, cells, metrics, shown, varying, m: tabMetric(S.m, [doc]) };
 }
 
 // ---------- render ----------
@@ -55,7 +54,6 @@ function renderSelectors(run) {
   };
   fill("sel-scenario", families(), S.s, (v) => v);
   fill("sel-run", runsOf(S.s).map((r) => r.id), S.r, (v) => runLabel(entry(v)));
-  fill("sel-metric", run ? run.shown : [], S.m, (v) => mlabel(v));
 }
 
 function runHeader(run) {
@@ -71,7 +69,7 @@ function runHeader(run) {
 }
 
 function coverage(run) {
-  const m = S.m;
+  const m = run.m;
   const secs = sectionsOf(S.s);
   const rows = secs.map((sec) => {
     const cs = [...run.cells.values()].filter((c) => sec.test(c.mix) && c.by[m]);
@@ -247,8 +245,12 @@ function renderRun(run) {
   appendix.addEventListener("toggle", () => {
     if (appendix.open && appendix.childElementCount === 1) appendix.append(...sectionsOf(S.s).map((sec) => sectionTables(run, sec)).filter(Boolean));
   });
-  return [h("section", { class: "block", id: "run" }, runHeader(run), coverage(run)),
-    ...sectionsOf(S.s).map((sec) => sectionPanels(run, sec, S.m)), appendix];
+  const tabs = tabBar(S.m, (tab) => { S.m = tab; S.cell = ""; commit(); });
+  if (![...run.cells.values()].some((c) => c.by[run.m])) {
+    return [h("section", { class: "block", id: "run" }, runHeader(run), tabs, h("p", { class: "note" }, "no data")), appendix];
+  }
+  return [h("section", { class: "block", id: "run" }, runHeader(run), tabs, coverage(run)),
+    ...sectionsOf(S.s).map((sec) => sectionPanels(run, sec, run.m)), appendix];
 }
 
 // ---------- cell detail ----------
@@ -279,7 +281,7 @@ function renderCell(run, cell) {
           h("td", { class: "num" }, sp && sp.cv != null ? `${(sp.cv * 100).toFixed(1)}%` : ""));
       }))),
     c.missing ? h("p", { class: "note" }, `Missing: ${c.missing}`) : null,
-    strip(cell.by[S.m] || cell.by[run.shown[0]] || cell.by[ms[0]]),
+    strip(cell.by[run.m] || cell.by[run.shown[0]] || cell.by[ms[0]]),
     h("h3", { style: "margin-top: 20px" }, "Rerun"),
     reproBlock(r),
     runsTable(c, ms),
@@ -291,7 +293,6 @@ async function render() {
   const doc = want ? await getRun(want) : null;
   if (S.r !== want) return; // a newer selection is rendering
   const run = doc ? runOf(doc) : null;
-  if (run && !run.shown.includes(S.m)) { S.m = run.shown[0] || ""; const hsh = toHash(S); lastHash = hsh; history.replaceState(null, "", hsh); }
   renderSelectors(run);
   closeDrawer();
   document.getElementById("out").replaceChildren(...(run ? renderRun(run) : [h("p", {}, "No runs.")]).filter(Boolean));
@@ -300,7 +301,6 @@ async function render() {
 function wire() {
   document.getElementById("sel-scenario").addEventListener("change", (e) => { S = parseHash(toHash({ s: e.target.value, r: "", m: S.m })); commit(); });
   document.getElementById("sel-run").addEventListener("change", (e) => { S = { s: S.s, r: e.target.value, m: S.m, cell: "" }; commit(); });
-  document.getElementById("sel-metric").addEventListener("change", (e) => { S.m = e.target.value; S.cell = ""; commit(); });
   window.addEventListener("hashchange", () => {
     if (location.hash === lastHash) return;
     lastHash = location.hash;

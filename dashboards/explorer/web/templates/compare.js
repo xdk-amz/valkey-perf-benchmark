@@ -33,13 +33,14 @@ function parseHash(hash) {
   const b = side("b", "bl", d.b, a.sl); // B's slice defaults to A's
   const cell = /^[0-9a-f]{8}$/.test(q.get("cell") || "") ? q.get("cell") : "";
   const num = (k) => { const v = Number(q.get(k)); return q.has(k) && Number.isFinite(v) && v >= 0 ? v : null; };
-  return { a, b, bar: [num("rel"), num("abs")], cell };
+  return { a, b, m: parseTab(q), bar: [num("rel"), num("abs")], cell };
 }
 function toHash(st) {
   const q = new URLSearchParams({ a: st.a.r });
   if (st.a.sl) q.set("al", st.a.sl);
   q.set("b", st.b.r);
   if (st.b.sl) q.set("bl", st.b.sl);
+  q.set("m", st.m || "tps");
   if (st.bar && st.bar[0] != null) { q.set("rel", st.bar[0]); q.set("abs", st.bar[1]); }
   if (st.cell) q.set("cell", st.cell);
   return "#" + q.toString();
@@ -51,7 +52,6 @@ function commit() {
 }
 
 // ---------- cells and the comparison ----------
-const throughputMetric = (docs) => (docs.some((d) => d.cells.some((c) => c.metrics.server_ops)) ? "server_ops" : "ops");
 // a cell id with the slice value blanked wherever it is a segment (the set scenarios' ids carry the mix)
 const unslice = (id, sl) => (sl ? id.split(".").map((x) => (x === sl ? "*" : x)).join(".") : id);
 const seriesCells = (doc, side) => {
@@ -77,47 +77,67 @@ function cellsOf(docA, docB) {
   return cells;
 }
 
-// B against A for one metric: paired runs when they share pair ids, else the medians with non-overlapping ranges
+// B against A for one metric, against that metric's bar (metrics.json: a relative % and an absolute part, in ns
+// per call for throughput, else in the metric's own unit) and in its direction (better: higher or lower): paired
+// reps when they share pair ids, else the medians with non-overlapping ranges. A side without the metric is
+// "no data".
 function judge(ra, rb, m) {
-  if (!ra) return { status: "onlyB" };
-  if (!rb) return { status: "onlyA" };
-  if (ra.value == null || rb.value == null) return { status: "missing", why: ra.value == null ? `A: ${ra.missing}` : `B: ${rb.missing}` };
+  if (!ra || !rb || ra.value == null || rb.value == null) {
+    const side = !ra || ra.value == null ? "A" : "B";
+    const r = side === "A" ? ra : rb;
+    return { status: "nodata", why: `no data on ${side}${r && r.missing ? `: ${r.missing}` : ""}` };
+  }
+  const md = DATA.metrics[m];
   const [relBar, absBar] = S.bar;
-  const per = (a, b) => 1e9 / b - 1e9 / a;
+  const perCall = md.unit === "ops/s";
+  const delta = perCall ? (a, b) => 1e9 / b - 1e9 / a : (a, b) => b - a;
   const am = new Map(ra.runs.filter(ok).filter((x) => x.p).map((x) => [x.p, x.v]));
   const pairs = rb.runs.filter(ok).filter((x) => x.p && am.has(x.p)).map((x) => ({ p: x.p, a: am.get(x.p), b: x.v }));
-  let pct, dns, ref, agree, how;
+  let pct, dabs, ref, agree, how;
   if (pairs.length) {
     const ps = pairs.map((x) => 100 * (x.b / x.a - 1));
     pct = median(ps);
-    dns = median(pairs.map((x) => per(x.a, x.b)));
+    dabs = median(pairs.map((x) => delta(x.a, x.b)));
     ref = median(pairs.map((x) => x.a));
     agree = pairs.length >= 5 && (ps.every((x) => x > 0) || ps.every((x) => x < 0));
     how = `${pairs.length} pairs`;
   } else {
     const va = ra.runs.filter(ok).map((x) => x.v), vb = rb.runs.filter(ok).map((x) => x.v);
     pct = 100 * (rb.value / ra.value - 1);
-    dns = per(ra.value, rb.value);
+    dabs = delta(ra.value, rb.value);
     ref = ra.value;
     agree = va.length >= 5 && vb.length >= 5 && (Math.max(...vb) < Math.min(...va) || Math.min(...vb) > Math.max(...va));
-    how = `${va.length} and ${vb.length} unpaired runs`;
+    how = `${va.length} and ${vb.length} unpaired reps`;
   }
-  const flag = agree && Math.abs(pct) > relBar && Math.abs(dns) > absBar;
-  const t = 1e9 / ref;
-  const band = [Math.min(1 - relBar / 100, t / (t + absBar)), Math.max(1 + relBar / 100, t > absBar ? t / (t - absBar) : 99)];
-  return { status: flag ? (pct < 0 ? "slower" : "faster") : "pass", pct, dns, pairs, band, how, a: ra.value, b: rb.value, na: ra.n, nb: rb.n };
+  const flag = agree && Math.abs(pct) > relBar && Math.abs(dabs) > absBar;
+  const worse = md.better === "higher" ? pct < 0 : pct > 0;
+  let band;
+  if (perCall) {
+    const t = 1e9 / ref;
+    band = [Math.min(1 - relBar / 100, t / (t + absBar)), Math.max(1 + relBar / 100, t > absBar ? t / (t - absBar) : 99)];
+  } else {
+    band = [Math.max(0.01, Math.min(1 - relBar / 100, 1 - absBar / ref)), Math.max(1 + relBar / 100, 1 + absBar / ref)];
+  }
+  return { status: flag ? (worse ? "fail" : "exceed") : "pass", pct, dabs, pairs, band, how, a: ra.value, b: rb.value, na: ra.n, nb: rb.n };
 }
-const compared = (j) => ["pass", "slower", "faster"].includes(j.status);
+const compared = (j) => ["pass", "fail", "exceed"].includes(j.status);
 
 // ---------- formatting ----------
 const pctText = (v) => `${v >= 0 ? "+" : "\u2212"}${Math.abs(v).toFixed(1)}%`;
+const sign = (v) => (v >= 0 ? "+" : "\u2212");
 function nsText(v) {
   const a = Math.abs(v);
   const s = a >= 1e6 ? `${(a / 1e6).toFixed(2)} ms` : a >= 1e3 ? `${(a / 1e3).toFixed(1)} µs` : `${a.toFixed(0)} ns`;
-  return `${v >= 0 ? "+" : "\u2212"}${s}`;
+  return `${sign(v)}${s}`;
 }
-const STATUS_TEXT = { slower: "Fail", faster: "Exceed", pass: "Pass",
-  onlyB: "no run on A", onlyA: "no run on B", missing: "missing" };
+// the absolute change in the unit of the metric's bar: ns per call for throughput, else the metric's own unit
+function absText(m, v) {
+  const u = DATA.metrics[m].unit, a = Math.abs(v);
+  if (u === "ops/s") return `${nsText(v)} per call`;
+  if (u === "ms") return `${sign(v)}${a < 1 ? `${+(a * 1000).toPrecision(3)} µs` : `${+a.toPrecision(3)} ms`}`;
+  return `${sign(v)}${+a.toPrecision(3)} ${u}`;
+}
+const STATUS_TEXT = { fail: "Fail", exceed: "Exceed", pass: "Pass", nodata: "no data" };
 
 // ---------- panels (the #4959 report's per-command panels) ----------
 const TICKS = [-75, -50, -25, -10, -5, -2, 0, 2, 5, 10, 25, 50, 100, 200, 300];
@@ -160,9 +180,9 @@ function cmpPanel(rows, title, m) {
       for (const p of j.pairs) g.append(svg("circle", { class: "pair", cx: X(p.b / p.a), cy: y, r: 2.2 }));
       const x = X(1 + j.pct / 100);
       g.append(svg("path", { class: `med ${j.status}`, d: `M${x},${y - 5}l5,5l-5,5l-5,-5z` }));
-      g.append(svg("text", { class: `val ${j.status}`, x: PX1 + 12, y: y + 4 }, `${pctText(j.pct)} ${nsText(j.dns)}`));
+      g.append(svg("text", { class: `val ${j.status}`, x: PX1 + 12, y: y + 4 }, `${pctText(j.pct)} ${absText(m, j.dabs).replace(" per call", "")}`));
       tip += `A ${exact(j.a, DATA.metrics[m].unit)} (n ${j.na}) · B ${exact(j.b, DATA.metrics[m].unit)} (n ${j.nb})\n` +
-        `${pctText(j.pct)}, ${nsText(j.dns)} per call, ${j.how}\n${STATUS_TEXT[j.status]}`;
+        `${pctText(j.pct)}, ${absText(m, j.dabs)}, ${j.how}\n${STATUS_TEXT[j.status]}`;
     }
     const hit = svg("rect", { class: "hit", x: 0, y: TOP + RH * i, width: W, height: RH, tabindex: 0, role: "button",
       "aria-label": tip.replace(/\n/g, "; ") }, svg("title", {}, tip));
@@ -178,7 +198,7 @@ function openCell(cell) { S.cell = cell.hash; commit(); window.scrollTo(0, 0); }
 
 const onBoth = (c) => c.a && c.b;
 function panels(cells, m) {
-  const cs = [...cells.values()].filter(onBoth).map((c) => ({ c, j: judge(c.a[m], c.b[m], m) })).filter((x) => x.j.status !== "onlyA" && x.j.status !== "onlyB");
+  const cs = [...cells.values()].filter(onBoth).map((c) => ({ c, j: judge(c.a[m], c.b[m], m) }));
   const names = [...new Set(cs.map((x) => x.c.row))].sort(panelOrder);
   const shapes = [...new Set(cs.map((x) => x.c.shape))].sort(panelShapeOrder);
   const figs = names.map((name) => {
@@ -199,12 +219,12 @@ function panels(cells, m) {
 
 // Fail / Pass / Exceed over the cells on both series, one total row
 function tally(cells, m) {
-  const cs = [...cells.values()].filter(onBoth).map((c) => ({ c, j: judge(c.a[m], c.b[m], m) })).filter((x) => compared(x.j));
-  if (!cs.length) return null;
-  const k = (xs) => ({ slower: xs.filter((x) => x.j.status === "slower").length, pass: xs.filter((x) => x.j.status === "pass").length,
-    faster: xs.filter((x) => x.j.status === "faster").length });
+  const both = [...cells.values()].filter(onBoth);
+  if (!both.length) return null;
+  const cs = both.map((c) => ({ c, j: judge(c.a[m], c.b[m], m) })).filter((x) => compared(x.j));
+  const k = (xs) => Object.fromEntries(["fail", "pass", "exceed"].map((s) => [s, xs.filter((x) => x.j.status === s).length]));
   const row = (label, t, cls) => h("tr", { class: cls }, h("th", { scope: "row" }, label),
-    ["slower", "pass", "faster"].map((s) => h("td", { class: `num v-${s}` }, t[s])));
+    ["fail", "pass", "exceed"].map((s) => h("td", { class: `num v-${s}` }, t[s])));
   return h("section", { class: "block", id: "tally" },
     h("table", { class: "coverage tally" },
       h("thead", {}, h("tr", {}, h("td", {}),
@@ -276,12 +296,12 @@ function renderCell(docs, m, cell) {
       ["Scenario", any.family], ["A", seriesLabel(S.a)], ["B", seriesLabel(S.b)], ["Command sent", any.command_line || "not recorded"],
     ].map(([k, v]) => [h("dt", {}, k), h("dd", {}, String(v))])),
     h("table", {},
-      h("thead", {}, h("tr", {}, [mlabel(m), "A", "B", "Change", "Per call", "Pairs", "Verdict"].map((x, i) => h("th", { scope: "col", class: i && i < 5 ? "num" : "" }, x)))),
+      h("thead", {}, h("tr", {}, [mlabel(m), "A", "B", "Change", "Absolute", "Pairs", "Verdict"].map((x, i) => h("th", { scope: "col", class: i && i < 5 ? "num" : "" }, x)))),
       h("tbody", {}, h("tr", {}, h("th", { scope: "row" }, "median"),
         h("td", { class: "num" }, cell.a && cell.a[m] ? exact(cell.a[m].value, unit) : "not on A"),
         h("td", { class: "num" }, cell.b && cell.b[m] ? exact(cell.b[m].value, unit) : "not on B"),
         h("td", { class: `num v-${j.status}` }, compared(j) ? pctText(j.pct) : ""),
-        h("td", { class: "num" }, compared(j) ? nsText(j.dns) : ""),
+        h("td", { class: "num" }, compared(j) ? absText(m, j.dabs) : ""),
         h("td", {}, compared(j) ? j.how : ""), h("td", {}, j.why || STATUS_TEXT[j.status])))),
     compared(j) && j.pairs.length ? h("details", { open: j.pairs.length <= 12, style: "margin-top: 12px" }, h("summary", {}, `Pairs (${j.pairs.length})`),
       h("table", {}, h("thead", {}, h("tr", {}, ["Pair", "A", "B", "Change"].map((x, i) => h("th", { scope: "col", class: i ? "num" : "" }, x)))),
@@ -291,7 +311,7 @@ function renderCell(docs, m, cell) {
 }
 
 // ---------- render ----------
-function renderSelectors() {
+function renderSelectors(m) {
   const fill = (id, values, cur, lab) => {
     const el = document.getElementById(id);
     el.replaceChildren(...values.map((v) => h("option", { value: v }, lab(v))));
@@ -300,6 +320,10 @@ function renderSelectors() {
   const [ir, ia] = [document.getElementById("bar-rel"), document.getElementById("bar-abs")];
   if (document.activeElement !== ir) ir.value = S.bar[0];
   if (document.activeElement !== ia) ia.value = S.bar[1];
+  // the bar's absolute part is in its metric's unit: ns per call for throughput, ms for latency, B for memory
+  const unit = DATA.metrics[m].bar[2];
+  ia.previousElementSibling.textContent = `Bar (${unit})`;
+  ia.step = unit === "ms" ? "0.01" : unit === "B" ? "1" : "5";
   const all = families().flatMap((f) => runsOf(f).filter((r) => r.families[0] === f)).map((r) => r.id);
   for (const k of ["a", "b"]) {
     fill(`sel-${k}-run`, all, S[k].r, (v) => `${familyOf(v)} · ${runLabel(entry(v))}`);
@@ -316,18 +340,22 @@ function renderSelectors() {
 // the comparison of the selected series: both run files, the metric, the matched cells
 async function compareState() {
   const docs = await Promise.all([getRun(S.a.r), getRun(S.b.r)]);
-  const m = throughputMetric(docs);
+  const m = tabMetric(S.m, docs);
   if (S.bar[0] == null) S.bar = DATA.metrics[m].bar.slice(0, 2);
   return { docs, m, cells: cellsOf(docs[0], docs[1]) };
 }
 
 async function render() {
   const { docs, m, cells } = await compareState();
-  renderSelectors();
+  const hsh = toHash(S); // a new tab takes its own metric's bar: keep it in the URL too
+  if (hsh !== location.hash) { lastHash = hsh; history.replaceState(null, "", hsh); }
+  renderSelectors(m);
   closeDrawer();
   const out = document.getElementById("out");
   if (S.cell) out.replaceChildren(...renderCell(docs, m, [...cells.values()].find((c) => c.hash === S.cell)).filter(Boolean));
-  else out.replaceChildren(...[h("section", { class: "block", id: "summary" }, header(docs[0], docs[1])), tally(cells, m), panels(cells, m), notOnBoth(cells)].filter(Boolean));
+  else out.replaceChildren(...[h("section", { class: "block", id: "summary" }, header(docs[0], docs[1])),
+    tabBar(S.m, (tab) => { S.m = tab; S.bar = [null, null]; S.cell = ""; commit(); }),
+    tally(cells, m), panels(cells, m), notOnBoth(cells)].filter(Boolean));
 }
 
 function wire() {

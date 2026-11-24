@@ -93,6 +93,23 @@ function fmtv(v, unit) {
   return compact(v, unit);
 }
 
+// ---------- metric tabs (both pages) ----------
+// A tab names a metric; the page shows that metric everywhere and keeps the tab in the URL (m=).
+const TABS = [["tps", "TPS"], ["p50", "p50"], ["p99", "p99"], ["mem", "memory per key (B)"]];
+const parseTab = (q) => (TABS.some(([t]) => t === q.get("m")) ? q.get("m") : "tps");
+// the metric a tab shows in these run files: TPS is the server-side rate when any of them has it
+function tabMetric(tab, docs) {
+  if (tab === "p50") return "p50_ms";
+  if (tab === "p99") return "p99_ms";
+  if (tab === "mem") return "bytes_per_key";
+  return docs.some((d) => d.cells.some((c) => c.metrics.server_ops)) ? "server_ops" : "ops";
+}
+function tabBar(cur, pick) {
+  return h("div", { class: "tabs", role: "tablist", "aria-label": "Metric" }, TABS.map(([t, label]) =>
+    h("button", { type: "button", role: "tab", class: "tab", "aria-selected": t === cur ? "true" : "false",
+      onclick: () => pick(t) }, label)));
+}
+
 // ---------- data ----------
 // The site holds one vpb-result file per run (SCHEMA.md) and data/manifest.json listing them; a page loads only
 // the runs it shows. With --inline every run is in the page.

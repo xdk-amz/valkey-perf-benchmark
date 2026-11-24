@@ -404,3 +404,131 @@ def test_single_run_shows_each_cells_median_and_the_run_fingerprint():
     assert shown == medians
     assert pr["fingerprint"] == doc["run"]["fingerprint"]["hash"]
     assert ci["fingerprint"] == load(CI9)["run"]["fingerprint"]["hash"]
+
+
+def scaled(doc, run_id, factors, memory=None):
+    """A copy of a run with each rep's metrics scaled (and a memory value added), as another run."""
+    d = copy.deepcopy(doc)
+    d["run"]["id"] = run_id
+    for c in d["cells"]:
+        for r in c["runs"]:
+            for m, f in factors.items():
+                if f is None:
+                    r.pop(m, None)
+                elif m in r:
+                    r[m] = cells.num(r[m] * f)
+            if memory is not None:
+                r["bytes_per_key"] = memory + r["rep"]
+    return schema.finish(d)
+
+
+def write(tmp_path, *docs):
+    paths = []
+    for d in docs:
+        assert schema.check_doc(d, d["run"]["id"]) == []
+        p = tmp_path / f"{d['run']['id']}.json"
+        p.write_text(json.dumps(d))
+        paths.append(p)
+    return paths
+
+
+@node
+def test_tabs_switch_the_metric_bar_and_url():
+    q = {t: f"#a={CI1_ID}&b={CI9_ID}&m={t}" for t in ("tps", "p50", "p99", "mem")}
+    q["none"] = f"#a={CI1_ID}&b={CI9_ID}"
+    got = harness("compare", q, CI1, CI9)
+    assert {t: got[t]["m"] for t in q} == {
+        "tps": "ops",
+        "p50": "p50_ms",
+        "p99": "p99_ms",
+        "mem": "bytes_per_key",
+        "none": "ops",
+    }
+    assert (got["tps"]["bar"], got["p50"]["bar"], got["mem"]["bar"]) == (
+        [2, 20],
+        [2, 0.01],
+        [1, 16],
+    )
+    for t, g in got.items():
+        assert g["roundTrip"], t
+        assert f"m={'tps' if t == 'none' else t}" in g["hash"]
+    # each tab judges its own metric: the counts move with it
+    assert (
+        got["tps"]["counts"] != got["p50"]["counts"]
+        or got["p50"]["counts"] != got["p99"]["counts"]
+    )
+    assert (
+        got["mem"]["counts"]["nodata"] == 12
+    )  # the continuous benchmark measures no memory per key
+
+
+@node
+def test_each_metric_judges_in_its_own_direction(tmp_path):
+    a = scaled(load(CI1), "a-run", {}, memory=100)
+    # B: twice the throughput (better), twice the p50 (worse), half the p99 (better), more memory (worse)
+    b = scaled(load(CI1), "b-run", {"ops": 2, "p50_ms": 2, "p99_ms": 0.5}, memory=300)
+    files = write(tmp_path, a, b)
+    got = harness(
+        "compare",
+        {t: f"#a=a-run&b=b-run&m={t}" for t in ("tps", "p50", "p99", "mem")},
+        *files,
+    )
+    want = {"tps": "exceed", "p50": "fail", "p99": "exceed", "mem": "fail"}
+    for t, status in want.items():
+        c = got[t]["counts"]
+        assert (
+            c[status] == 12
+            and sum(c[k] for k in ("fail", "pass", "exceed", "nodata")) == 12
+        ), (t, c)
+
+
+@node
+def test_a_metric_missing_on_either_side_is_no_data(tmp_path):
+    a = scaled(load(CI1), "a-run", {})
+    b = scaled(load(CI1), "b-run", {"p99_ms": None})
+    files = write(tmp_path, a, b)
+    got = harness(
+        "compare",
+        {
+            "ab": "#a=a-run&b=b-run&m=p99",
+            "ba": "#a=b-run&b=a-run&m=p99",
+            "p50": "#a=a-run&b=b-run&m=p50",
+        },
+        *files,
+    )
+    assert got["ab"]["counts"]["nodata"] == 12 and got["ba"]["counts"]["nodata"] == 12
+    assert got["p50"]["counts"]["nodata"] == 0
+    sets = harness(
+        "compare", {"p50": series(BASE_ID, "none", PR_ID, "none") + "&m=p50"}, BASE, PR
+    )["p50"]
+    assert sets["counts"] == {
+        "fail": 0,
+        "pass": 0,
+        "exceed": 0,
+        "nodata": 72,
+        "notOnBoth": 43,
+    }
+
+
+@node
+def test_single_run_tabs():
+    q = {
+        "tps": f"#s=set+commands&run={PR_ID}&m=tps",
+        "mem": f"#s=set+commands&run={PR_ID}&m=mem",
+        "p50": f"#s=set+commands&run={PR_ID}&m=p50",
+        "ci99": f"#s=continuous&run={CI9_ID}&m=p99",
+        "bad": f"#s=continuous&run={CI9_ID}&m=qps",
+    }
+    got = harness("single-run", q, BASE, PR, CI1, CI9)
+    assert {k: g["m"] for k, g in got.items()} == {
+        "tps": "server_ops",
+        "mem": "bytes_per_key",
+        "p50": "p50_ms",
+        "ci99": "p99_ms",
+        "bad": "ops",
+    }
+    assert (
+        got["tps"]["measured"] == 681 and got["p50"]["measured"] == 0
+    )  # the fixture keeps server_ops only
+    assert got["ci99"]["measured"] == 12 and got["bad"]["tab"] == "tps"
+    assert all(g["roundTrip"] for g in got.values()) and "m=p99" in got["ci99"]["hash"]

@@ -8,11 +8,11 @@
 svg.dots .cband { fill: var(--cband); }
 svg.dots .pair { fill: var(--pairdot); fill-opacity: 0.65; }
 svg.dots .med { stroke: var(--paper); stroke-width: 1; }
-svg.dots .med.slower { fill: var(--worse); } svg.dots .med.faster { fill: var(--better); } svg.dots .med.pass { fill: var(--inside); }
+svg.dots .med.fail { fill: var(--worse); } svg.dots .med.exceed { fill: var(--better); } svg.dots .med.pass { fill: var(--inside); }
 svg.dots .val { font-size: 10.5px; }
-svg.dots .val.slower { fill: var(--worse); font-weight: 600; } svg.dots .val.faster { fill: var(--better); font-weight: 600; }
+svg.dots .val.fail { fill: var(--worse); font-weight: 600; } svg.dots .val.exceed { fill: var(--better); font-weight: 600; }
 svg.dots .val.pass { fill: var(--mute); }
-td.v-slower { color: var(--worse); font-weight: 600; } td.v-faster { color: var(--better); font-weight: 600; }
+td.v-fail { color: var(--worse); font-weight: 600; } td.v-exceed { color: var(--better); font-weight: 600; }
 table.coverage caption { text-align: left; font-weight: 600; margin: var(--s4) 0 var(--s1); }
 .sides { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 30rem), 1fr)); gap: var(--s5); margin-top: var(--s4); }
 .side { min-width: 0; }

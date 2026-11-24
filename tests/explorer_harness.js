@@ -32,14 +32,15 @@ const COMPARE = `(async () => {
   for (const [name, hash] of Object.entries(__query)) {
     S = parseHash(hash);
     const { docs, m, cells } = await compareState();
-    const counts = { fail: 0, pass: 0, exceed: 0, notOnBoth: 0 };
+    const counts = { fail: 0, pass: 0, exceed: 0, nodata: 0, notOnBoth: 0 };
     for (const c of cells.values()) {
       if (!(c.a && c.b)) { counts.notOnBoth++; continue; }
-      const j = judge(c.a[m], c.b[m], m);
-      if (j.status === "slower") counts.fail++; else if (j.status === "faster") counts.exceed++; else if (j.status === "pass") counts.pass++;
+      counts[judge(c.a[m], c.b[m], m).status]++;
     }
     const fa = fingerprint(docs[0].run), fb = fingerprint(docs[1].run);
-    out[name] = { a: S.a, b: S.b, bar: S.bar, m, counts, fa: fa.hash, fb: fb.hash, hash: toHash(S),
+    const back = parseHash(toHash(S));
+    out[name] = { a: S.a, b: S.b, tab: S.m, bar: S.bar, m, counts, fa: fa.hash, fb: fb.hash, hash: toHash(S),
+      roundTrip: JSON.stringify(back) === JSON.stringify(S),
       diff: fingerprintDiff(fa, fb, ["repository", "commit", "build_version", "build_binary_sha256"]) };
   }
   return JSON.stringify(out);
@@ -49,11 +50,12 @@ const SINGLE = `(async () => {
   for (const [name, hash] of Object.entries(__query)) {
     S = parseHash(hash);
     const r = runOf(await getRun(S.r));
-    if (!r.shown.includes(S.m)) S.m = r.shown[0];
     const cells = [...r.cells.values()];
-    out[name] = { s: S.s, r: S.r, m: S.m, cells: cells.length, label: runLabel(entry(S.r)),
+    out[name] = { s: S.s, r: S.r, tab: S.m, m: r.m, cells: cells.length, label: runLabel(entry(S.r)),
+      hash: toHash(S), roundTrip: JSON.stringify(parseHash(toHash(S))) === JSON.stringify(S),
+      measured: cells.filter((c) => c.by[r.m] && c.by[r.m].value != null).length,
       sections: sectionsOf(S.s).map((x) => [x.title, cells.filter((c) => x.test(c.mix)).length]),
-      values: cells.map((c) => [c.row, c.shape, c.mix, c.by[S.m] ? c.by[S.m].value : null]),
+      values: cells.map((c) => [c.row, c.shape, c.mix, c.by[r.m] ? c.by[r.m].value : null]),
       fingerprint: fingerprint(r.run).hash };
   }
   return JSON.stringify(out);
