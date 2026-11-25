@@ -128,8 +128,8 @@ class ClientRunner:
         self.config_name = config_name
         self.module_commit = module_commit
         self.module_commit_timestamp = module_commit_timestamp
-        # Run facts for the run file (vpb_result.py): data_set, ref, config_path,
-        # server_local, server_type, server_ssh. None writes no vpb-result file.
+        # Run facts for the run file (vpb_result.py): data_set, ref, config_path, server_local,
+        # server_type, server_ssh, server_facts (read_server_facts), pair_id. None writes no vpb-result file.
         self.result_info = result_info
         self.current_profiling_set = {"enabled": False}
         self.current_config_set = {}
@@ -425,6 +425,8 @@ class ClientRunner:
 
         metric_json = []
         invocations = []
+        pair_id = (self.result_info or {}).get("pair_id")
+        several = self._get_effective_runs() > 1
         for scenario_data in self._iterate_test_groups_scenarios():
             started = vpb_result.now()
             result = self._run_single_scenario(
@@ -445,6 +447,11 @@ class ClientRunner:
                         "group": scenario_data["group_id"],
                         "rows": rows,
                         "time": started,
+                        "pair": (
+                            f"{pair_id}.{self.current_run}"
+                            if pair_id and several
+                            else pair_id
+                        ),
                     }
                 )
 
@@ -455,9 +462,19 @@ class ClientRunner:
             except Exception:  # metrics.json is written; the records are extra
                 logging.exception("Could not write the run file")
 
-    def _run_facts(self, sha: str) -> dict:
+    def _server_facts(self, sha: str) -> Optional[dict]:
+        """The --server-facts entry of this build, when the server is on another host."""
+        facts = self.result_info.get("server_facts")
+        if facts is None or self.result_info.get("server_local"):
+            return None
+        if sha not in facts:
+            logging.warning(f"--server-facts has no entry for {sha}")
+        return facts.get(sha)
+
+    def _run_facts(self, sha: str, entry: Optional[dict] = None) -> dict:
         """The host, build and setup facts of this run for its run file, read now: the server's INFO and
-        CONFIG GET, the server's host (here, or over --server-ssh) and this client host.
+        CONFIG GET, the server's host (here, over --server-ssh, or from its --server-facts entry) and this
+        client host.
         """
         info = self.result_info
         set_keys = list((self.config.get("custom-server-configs") or {}).keys()) + list(
@@ -494,7 +511,7 @@ class ClientRunner:
         io_threads = self.io_threads
         if io_threads is None and str(served).isdigit():
             io_threads = int(served)
-        return {
+        facts = {
             "server_host": server["host"],
             "client_host": client_host,
             "server_cpus": server["cpus"],
@@ -511,6 +528,12 @@ class ClientRunner:
             ),
             "io_threads": io_threads,
         }
+        if entry:
+            try:
+                facts = vpb_result.with_server_facts(facts, entry)
+            except ValueError as e:
+                logging.warning(f"--server-facts not used: {e}")
+        return facts
 
     def _write_result_records(self, invocations: list, commit_time: str) -> None:
         """Write this run's invocations to its run file, results_dir/vpb-runs/<run id>.json (vpb_result.py)."""
@@ -526,6 +549,7 @@ class ClientRunner:
             rerun += ["--mode client --use-running-server --target-ip <server-ip>"]
         if self.module_commit:
             rerun += ["--module <module> --module-path <module .so>"]
+        entry = self._server_facts(sha)
         doc = vpb_result.benchmark_run(
             self.config,
             invocations,
@@ -536,10 +560,10 @@ class ClientRunner:
                     self.commit_id, info.get("ref"), self.valkey_path
                 ),
                 "sha": sha,
-                "time": commit_time,
+                "time": commit_time or (entry or {}).get("time"),
             },
             config=vpb_result.harness_config(self.config, info.get("config_path")),
-            facts=self._run_facts(sha),
+            facts=self._run_facts(sha, entry),
             rerun=" ".join(rerun),
         )
         vpb_result.write_run(self.results_dir, doc)

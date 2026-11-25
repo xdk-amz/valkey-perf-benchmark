@@ -81,7 +81,7 @@ hardware, io-threads) are only in `run`, never in a cell.
 | `mix` | TTL or expiry mix: `none`, or the scenario's mix id (`10pct`, `exp_half`). |
 | `pipeline`, `clients` | Pipeline depth per connection and total client connections. |
 | `metrics` | Every metric a valid rep measured: `median`, `min`, `max` and `cv` of its valid reps. |
-| `runs` | Every rep: `rep` (1, 2, ...), `pair` (shared by the two builds' reps made back to back on one host, else null), `t` (start time), `ok`, `why` when `ok` is false, and each metric's value. |
+| `runs` | Every rep: `rep` (1, 2, ...), `pair` (shared by the reps of builds made back to back on one host pair, else null: `matrix_runner.py` sets it per rotation, `benchmark.py` from `--pair-id`), `t` (start time), `ok`, `why` when `ok` is false, and each metric's value. |
 | `missing` | Why no rep is valid; null when `metrics` has any. |
 
 ## Benchmark Fingerprint

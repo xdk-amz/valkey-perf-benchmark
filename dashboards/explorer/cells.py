@@ -3,6 +3,7 @@ two files of the same run."""
 
 import copy
 import json
+import re
 import statistics
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -10,6 +11,8 @@ from typing import Any, Dict, List, Optional
 METRICS_PATH = Path(__file__).resolve().parent / "metrics.json"
 METRICS_SCHEMA = "vpb-metrics"
 REP_KEYS = {"rep", "pair", "t", "ok", "why"}
+# an error that names the server's address says <server-ip>, as the reproduce line does
+IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 CELL_KEYS = (
     "id",
     "family",
@@ -92,7 +95,7 @@ def rep(
     """One rep of a cell: its number, pair id, time, validity and the value of every metric it measured."""
     r: Dict[str, Any] = {"rep": int(n), "pair": pair, "t": t, "ok": bool(ok)}
     if not ok:
-        r["why"] = why or "invalid"
+        r["why"] = IPV4.sub("<server-ip>", why or "invalid")
     r.update({k: num(v) for k, v in values.items()})
     return r
 

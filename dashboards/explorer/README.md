@@ -17,6 +17,23 @@ both runners:
 | `--server-ssh` | the ssh target of a server on another host, so its host facts and binary are read there (`benchmark.py`; `matrix_runner.py` uses `--server-host`) |
 | `--server-instance-type` | the type of a server on another host when it cannot be read there (`benchmark.py`) |
 | `--repository` | the builds' `owner/name` |
+| `--server-facts` | a server-facts file for a server on a host the client cannot ssh to: its entry for the commit gives the server's host facts, CPUs, binary sha256 and make arguments (`benchmark.py`) |
+| `--pair-id` | the pair id of the invocation's reps, the same for every build run back to back on one host pair (`benchmark.py`; with `--runs N` the reps get `<id>.<run>`; `matrix_runner.py` pairs the reps of a rotation itself) |
+
+A server-facts file is written on the server's host at setup, once per build
+with that build's server running as it will for the benchmark:
+
+```
+python vpb_result.py server-facts server-facts.json --sha <commit> --host <server-ip> --port 6379 --peer <client-ip>
+```
+
+Run files written without server facts or a pair id get them with `rewrite`,
+which writes each file again into a new directory; files of one build and
+fingerprint join:
+
+```
+python vpb_result.py rewrite out/ <run files of one rep> --server-facts server-facts.json --pair-id <pair id>
+```
 
 ## Views from a VPB run
 

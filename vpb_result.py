@@ -12,15 +12,24 @@ microcode, topology, memory, NIC, virtualization, cgroup CPU limit, OS, kernel, 
 settings (HOST_SCRIPT, run here or over ssh), plus io-threads, cores, pinning, network path, load generator and
 the harness commit. A fact a host cannot report is null. No host identifier is read into a run file.
 
+A server on a host the client cannot ssh to has its facts read there at setup, one entry per build in a
+server-facts file (``python vpb_result.py server-facts``), which benchmark.py takes with --server-facts.
+--pair-id pairs the reps of builds run back to back on one host pair. ``python vpb_result.py rewrite`` adds
+both to run files written without them.
+
 Standard library only, so matrix_runner.py stays runnable on a bench host's Python 3.9.
 """
 
+import argparse
+import copy
 import json
 import logging
 import os
 import re
 import shlex
+import socket
 import subprocess
+import sys
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -36,6 +45,8 @@ GITHUB_REMOTE = re.compile(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 INSTANCE_TYPE = re.compile(r"^[a-z][a-z0-9-]*\.[a-z0-9-]+$")
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
+PAIR_ID = re.compile(r"^[\w.:-]{1,64}$")
+PINNING = re.compile(r"^server CPUs (.*), client CPUs (.*)$")
 
 # Value type of a command, by its name or the first word of its command line.
 TYPES = {
@@ -611,6 +622,106 @@ def server_side(
     }
 
 
+def server_facts(
+    run: Run,
+    info: Dict[str, Any],
+    sha: str,
+    *,
+    tree: Optional[str] = None,
+    peer: Optional[str] = None,
+) -> Dict[str, Any]:
+    """One build's entry in a server-facts file: what server_side reads over ssh, read on the server's own host
+    while that build's server runs (its host and CPUs, the build, the commit time). tree: the build's checkout,
+    default the one its executable sits in."""
+    pid = info.get("process_id")
+    host, cpus = collect_host(
+        run, pid=int(pid) if str(pid).isdigit() else None, peer=peer
+    )
+    exe = info.get("executable")
+    tree = tree or (os.path.dirname(os.path.dirname(exe)) if exe else None)
+    return {
+        "host": host,
+        "cpus": cpus,
+        "build_info": build_info(info, run, exe, sha),
+        "time": commit_time(run, tree, sha),
+    }
+
+
+def read_server_facts(path) -> Dict[str, Dict[str, Any]]:
+    """A server-facts file: commit SHA -> its server_facts() entry. Raises ValueError on anything else."""
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{path}: not a server-facts file: {e}") from None
+    if not isinstance(doc, dict):
+        raise ValueError(f"{path}: not a server-facts file")
+    out = {}
+    for sha, e in doc.items():
+        ok = (
+            SHA.match(str(sha))
+            and isinstance(e, dict)
+            and isinstance(e.get("host"), dict)
+            and not set(e["host"]) - set(HOST_KEYS)
+            and isinstance(e.get("build_info"), dict)
+            and isinstance(e.get("cpus"), (str, type(None)))
+            and isinstance(e.get("time"), (str, type(None)))
+        )
+        if not ok:
+            raise ValueError(f"{path}: bad entry for {sha!r}")
+        out[sha] = {
+            "host": {k: e["host"].get(k) for k in HOST_KEYS},
+            "cpus": e["cpus"],
+            "build_info": {
+                k: e["build_info"].get(k) for k in ("version", *schema.BUILD_FACT_KEYS)
+            },
+            "time": e["time"],
+        }
+    return out
+
+
+def with_server_facts(facts: Dict[str, Any], entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Run facts with the server's host, CPUs, make arguments and binary sha256 from its server-facts entry. The
+    version and build settings stay the ones this run's server reported in INFO; a version that differs from the
+    entry's means another binary, a ValueError."""
+    b, e = dict(facts["build_info"]), entry["build_info"]
+    if b.get("version") and e.get("version") and b["version"] != e["version"]:
+        raise ValueError(
+            f"the server runs {b['version']}, its server facts say {e['version']}"
+        )
+    for k in ("args", "binary_sha256"):  # read on the server's host
+        if e.get(k) is not None:
+            b[k] = e[k]
+    for k in ("version", "settings"):  # INFO's, unless it said nothing
+        if b.get(k) is None:
+            b[k] = e.get(k)
+    host = dict(entry["host"])
+    if host.get("instance_type") is None:
+        host["instance_type"] = facts["server_host"].get("instance_type")
+    return dict(
+        facts,
+        server_host=host,
+        server_cpus=entry["cpus"] or facts.get("server_cpus"),
+        build_info=b,
+    )
+
+
+def local_info(port: int, host: str = "127.0.0.1") -> Dict[str, str]:
+    """INFO of a server on this host, over a plain socket. shortcut: no AUTH or TLS, add them when a server
+    that needs them is benchmarked this way."""
+    with socket.create_connection((host, port), timeout=10) as s:
+        s.sendall(b"*1\r\n$4\r\nINFO\r\n")
+        f = s.makefile("rb")
+        head = f.readline()
+        if not head.startswith(b"$"):
+            raise ValueError(f"INFO failed: {head.decode(errors='replace').strip()}")
+        body = f.read(int(head[1:]))
+    return dict(
+        line.split(":", 1)
+        for line in body.decode(errors="replace").splitlines()
+        if ":" in line and not line.startswith("#")
+    )
+
+
 # ---------------------------------------------------------------- run facts
 def add_arguments(p, ref: bool = True) -> None:
     """The options every runner takes for its run files."""
@@ -640,11 +751,31 @@ def add_arguments(p, ref: bool = True) -> None:
             help="branch or tag the commits come from, for the run file; "
             "defaults to a --commits value that is not a SHA, else the checkout's branch",
         )
+        p.add_argument(
+            "--server-facts",
+            default=None,
+            help="server-facts file of a server on a host this client cannot ssh to, written there at setup "
+            "(python vpb_result.py server-facts); its entry for the commit gives the server's host facts, CPUs, "
+            "binary sha256 and make arguments",
+        )
+        p.add_argument(
+            "--pair-id",
+            default=None,
+            type=_pair_id,
+            help="pair id of this invocation's reps, the same for every build run back to back on one host "
+            "pair, so each cell's reps pair up across those builds' run files (with --runs N: <id>.<run>)",
+        )
 
 
 def _data_set(value: str) -> str:
     if not schema.DATA_SET.match(value):
         raise ValueError(f"not a data set: {value!r}")
+    return value
+
+
+def _pair_id(value: str) -> str:
+    if not PAIR_ID.match(value):
+        raise ValueError(f"not a pair id: {value!r}")
     return value
 
 
@@ -792,6 +923,65 @@ def run_doc(
         h = doc["run"]["fingerprint"]["hash"][:8]
         doc["run"]["id"] = "-".join([date, *map(slug, id_parts), h])[:128]
     return doc
+
+
+def facts_of(run: Dict[str, Any]) -> Dict[str, Any]:
+    """The facts a run file was written from, read back from its fingerprint."""
+    fp = run["fingerprint"]
+    m = PINNING.match(fp.get("pinning") or "")
+    cpus = [
+        None if not m or v == "not recorded" else v
+        for v in (m.groups() if m else (None, None))
+    ]
+    return {
+        "server_host": dict(fp["server"]),
+        "client_host": dict(fp["client"]),
+        "server_cpus": cpus[0],
+        "client_cpus": cpus[1],
+        "build_info": dict(fp["build"], version=run["build"].get("version")),
+        "server_config": fp["server_config"],
+        "load_generator": fp["load_generator"],
+        "network_path": fp["network_path"],
+        "io_threads": fp["io_threads"],
+    }
+
+
+def rewrite(
+    doc: Dict[str, Any],
+    entry: Optional[Dict[str, Any]] = None,
+    pair: Optional[str] = None,
+) -> Dict[str, Any]:
+    """A run file written again: with its server's facts from a server-facts entry, and with pair as the pair id of
+    its reps (<pair>.<rep> in a cell with several). Its fingerprint, and so its id, follow the new facts.
+    """
+    r = doc["run"]
+    facts = facts_of(r)
+    if entry:
+        facts = with_server_facts(facts, entry)
+    cells_ = copy.deepcopy(doc["cells"])
+    for c in cells_:
+        for x in c["runs"]:
+            if pair:
+                x["pair"] = pair if len(c["runs"]) == 1 else f"{pair}.{x['rep']}"
+            if x.get("why"):
+                x["why"] = cells.IPV4.sub("<server-ip>", x["why"])
+    build = dict(r["build"])
+    if not build.get("time") and entry:
+        build["time"] = entry["time"]
+    fam = cells_[0]["family"] if cells_ else "run"
+    return run_doc(
+        run_id=None,
+        data_set=r["data_set"],
+        build=build,
+        harness_=r["harness"],
+        config=(r["harness"]["config"], r["harness"]["config_inline"]),
+        facts=facts,
+        cells_=cells_,
+        reproduce=r["reproduce"],
+        started=r["started"],
+        finished=r["finished"],
+        id_parts=[fam, build["ref"], build["sha"][:9]],
+    )
 
 
 # ---------------------------------------------------------------- benchmark.py
@@ -1162,6 +1352,8 @@ def write_run(results_dir: Path, doc: Dict[str, Any], merge: bool = True) -> Pat
             run = dict(doc["run"], id=old["run"]["id"])
             times = [t for t in (old["run"]["started"], doc["run"]["started"]) if t]
             run["started"] = min(times) if times else None
+            ends = [t for t in (old["run"]["finished"], doc["run"]["finished"]) if t]
+            run["finished"] = max(ends) if ends else None
             merged = {
                 "schema": schema.SCHEMA,
                 "run": run,
@@ -1178,3 +1370,72 @@ def write_run(results_dir: Path, doc: Dict[str, Any], merge: bool = True) -> Pat
 
 def loopback(target: str) -> bool:
     return target in LOOPBACK
+
+
+# ---------------------------------------------------------------- command line
+def main(argv: Optional[List[str]] = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="vpb_result.py", description="Server facts and run files."
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+    f = sub.add_parser(
+        "server-facts",
+        help="on the server's host, with a build's server running: add its entry to a server-facts file",
+    )
+    f.add_argument("file", type=Path)
+    f.add_argument("--sha", required=True, help="the build's full commit SHA")
+    f.add_argument("--host", default="127.0.0.1", help="the server's address here")
+    f.add_argument("--port", type=int, default=6379)
+    f.add_argument(
+        "--tree", default=None, help="the build's checkout (default: its executable's)"
+    )
+    f.add_argument(
+        "--peer", default=None, help="the client's address, to pick the interface"
+    )
+    w = sub.add_parser(
+        "rewrite",
+        help="write run files again into OUT_DIR/vpb-runs with their server facts and a pair id; files of one "
+        "build and fingerprint join",
+    )
+    w.add_argument("out", type=Path)
+    w.add_argument("runs", nargs="+", type=Path)
+    w.add_argument("--server-facts", default=None, type=Path)
+    w.add_argument("--pair-id", default=None, type=_pair_id)
+    a = p.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    if a.cmd == "server-facts":
+        if not SHA.match(a.sha):
+            p.error(f"not a full commit SHA: {a.sha}")
+        if a.peer and not PEER.match(a.peer):
+            p.error(f"not an address: {a.peer}")
+        facts = read_server_facts(a.file) if a.file.exists() else {}
+        facts[a.sha] = server_facts(
+            local_run, local_info(a.port, a.host), a.sha, tree=a.tree, peer=a.peer
+        )
+        _dump(a.file, facts)
+        return 0
+    try:
+        facts = read_server_facts(a.server_facts) if a.server_facts else None
+    except ValueError as e:
+        p.error(str(e))
+    docs = []
+    for path in a.runs:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if not schema.is_run_doc(doc):
+            p.error(f"{path}: not a {schema.SCHEMA} file")
+        entry = None
+        if facts is not None:
+            entry = facts.get(doc["run"]["build"]["sha"])
+            if entry is None:
+                p.error(f"{path}: {a.server_facts} has no entry for its commit")
+        try:
+            docs.append(rewrite(doc, entry, a.pair_id))
+        except ValueError as e:
+            p.error(f"{path}: {e}")
+    for doc in docs:
+        write_run(a.out, doc)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

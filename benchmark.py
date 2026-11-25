@@ -1140,6 +1140,8 @@ def _execute_benchmark_run(
                 or vpb_result.loopback(args.target_ip),
                 "server_type": getattr(args, "server_instance_type", None),
                 "server_ssh": getattr(args, "server_ssh", None),
+                "server_facts": getattr(args, "server_facts", None),
+                "pair_id": getattr(args, "pair_id", None),
             },
         )
 
@@ -1202,6 +1204,17 @@ def main() -> None:
     # Validate runs parameter
     if args.runs < 1:
         print("ERROR: --runs must be a positive integer")
+        sys.exit(1)
+
+    # a bad --server-facts file stops the run before it starts, not after it
+    try:
+        args.server_facts = (
+            vpb_result.read_server_facts(args.server_facts)
+            if args.server_facts
+            else None
+        )
+    except ValueError as e:
+        print(f"ERROR: {e}")
         sys.exit(1)
 
     # Load and validate configs

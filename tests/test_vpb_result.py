@@ -622,3 +622,282 @@ def test_cpu_count_and_build_ref():
     assert vpb_result.build_ref("a" * 40, None, None) == "unknown"
     assert vpb_result.build_ref("v8.1.0", None, None) == "v8.1.0"
     assert vpb_result.build_ref("a" * 40, "unstable", None) == "unstable"
+
+
+# ---------- a server on a host the client cannot reach, and reps paired across builds
+INFO = {"os": "Linux 6.1.0 aarch64", "valkey_version": "9.0.0", "mem_allocator": "jemalloc-5.3.0",
+        "arch_bits": "64", "process_id": "7", "executable": "/v/src/valkey-server"}  # fmt: skip
+
+
+def on_server(cmd, timeout=60, stdin=None):
+    """The server's host, as server_facts reads it: HOST_SCRIPT, sha256sum, the build stamp, git log."""
+    if stdin == vpb_result.HOST_SCRIPT:
+        return 0, ARM_OUT, ""
+    if cmd.startswith("sha256sum"):
+        return 0, "f" * 64 + "  x\n", ""
+    if "vpb-build-stamp" in cmd:
+        return 0, f"{SHA} tls=no args=\n", ""
+    if cmd.startswith("git -C /v log"):
+        return 0, "2026-11-18T10:00:00Z\n", ""
+    return 1, "", ""
+
+
+def entry():
+    return vpb_result.server_facts(on_server, INFO, SHA, peer="10.0.0.9")
+
+
+def test_server_facts_entry_round_trips_and_bad_files_are_refused(tmp_path):
+    e = entry()
+    assert (e["cpus"], e["time"], e["host"]["cpu_model"]) == (
+        "60-63",
+        "2026-11-18T10:00:00Z",
+        "Arm Neoverse-V1 r1p1",
+    )
+    assert e["build_info"] == {"version": "9.0.0", "settings": {"malloc": "jemalloc-5.3.0", "bits": "64"},
+                               "args": ["BUILD_TLS=no"], "binary_sha256": "f" * 64}  # fmt: skip
+    f = tmp_path / "server-facts.json"
+    f.write_text(
+        json.dumps({SHA: dict(e, tag="9.0.0")})
+    )  # a key it does not know is dropped
+    assert vpb_result.read_server_facts(f) == {SHA: e}
+    for bad in (
+        [e],
+        {"v9.0.0": e},
+        {SHA: dict(e, host=dict(e["host"], hostname="h1"))},
+        {SHA: dict(e, cpus=4)},
+        {SHA: {"host": e["host"]}},
+    ):
+        f.write_text(json.dumps(bad))
+        with pytest.raises(ValueError):
+            vpb_result.read_server_facts(f)
+
+
+def test_server_facts_fill_what_info_alone_cannot_say():
+    seen = vpb_result.server_side(
+        INFO, {"io-threads": "4"}, run=None, sha=SHA, instance_type="r7g.16xlarge"
+    )
+    facts = dict(FACTS, server_host=seen["host"], server_cpus=None,
+                 build_info=dict(seen["build_info"], settings={"malloc": "libc"}))  # fmt: skip
+    got = vpb_result.with_server_facts(facts, entry())
+    assert got["server_host"] == entry()["host"] and got["server_cpus"] == "60-63"
+    assert got["build_info"] == {"version": "9.0.0", "settings": {"malloc": "libc"},  # this server's INFO
+                                 "args": ["BUILD_TLS=no"], "binary_sha256": "f" * 64}  # fmt: skip
+    nodmi = dict(entry(), host=dict(entry()["host"], instance_type=None))
+    assert (
+        vpb_result.with_server_facts(facts, nodmi)["server_host"]["instance_type"]
+        == "r7g.16xlarge"
+    )
+    other = dict(facts, build_info=dict(facts["build_info"], version="8.1.0"))
+    with pytest.raises(ValueError, match="another|8.1.0"):
+        vpb_result.with_server_facts(other, entry())
+
+
+class FakeServer:
+    def info(self, section):
+        return {"server": INFO, "memory": {}}[section]
+
+    def config_get(self, *keys):
+        return {"io-threads": "4"}
+
+
+def client_runner(tmp_path, monkeypatch, runs=1, **info):
+    import contextlib
+
+    import valkey_benchmark
+
+    monkeypatch.setattr(valkey_benchmark, "resolve_ref", lambda c, p: SHA)
+    monkeypatch.setattr(
+        vpb_result, "collect_host", lambda *a, **k: (FACTS["client_host"], None)
+    )
+    monkeypatch.setattr(vpb_result, "local_run", lambda *a, **k: (0, "valkey-benchmark 9.0.0\n", ""))  # fmt: skip
+    cfg = benchmark.load_configs(str(ROOT / "configs" / "sampler-smoke.json"))[0]
+    r = valkey_benchmark.ClientRunner(
+        commit_id=SHA, config=cfg, cluster_mode=False, tls_mode=False, target_ip="10.0.0.5",
+        results_dir=tmp_path, valkey_path=str(tmp_path), cores="4-7", runs=runs, repository="valkey-io/valkey",
+        result_info={"data_set": "community", "ref": "9.0.0", "server_local": False, **info},
+    )  # fmt: skip
+    r._client_context = lambda *a, **k: contextlib.nullcontext(FakeServer())
+    return r, cfg
+
+
+def written(tmp_path):
+    (f,) = (tmp_path / "vpb-runs").glob("*.json")
+    return json.loads(f.read_text())
+
+
+def test_client_run_takes_the_remote_servers_facts_from_its_file(tmp_path, monkeypatch):
+    e = entry()  # before client_runner stubs the host reads
+    r, cfg = client_runner(tmp_path, monkeypatch, server_facts={SHA: e})
+    s = cfg["test_groups"][0]["scenarios"][0]
+    proc = MetricsProcessor(SHA, False, False, "t", None, None, None, None)
+    r._write_result_records(
+        [{"scenario": s, "group": 1, "rows": rows_for(proc, s), "pair": "p1.u.r1"}],
+        None,
+    )
+    doc = written(tmp_path)
+    fp, run = doc["run"]["fingerprint"], doc["run"]
+    assert schema.check_doc(doc, "x") == []
+    assert (
+        fp["server"] == e["host"]
+        and fp["pinning"] == "server CPUs 60-63, client CPUs 4-7"
+    )
+    assert (fp["cores"], fp["build"]["args"], fp["build"]["binary_sha256"]) == (
+        4,
+        ["BUILD_TLS=no"],
+        "f" * 64,
+    )
+    assert (
+        run["build"]["time"] == "2026-11-18T10:00:00Z"
+        and doc["cells"][0]["runs"][0]["pair"] == "p1.u.r1"
+    )
+    # no entry for the build: the run file is written with what INFO says
+    other = tmp_path / "other"
+    r, _ = client_runner(other, monkeypatch, server_facts={"a" * 40: e})
+    r._write_result_records(
+        [{"scenario": s, "group": 1, "rows": rows_for(proc, s)}], None
+    )
+    assert written(other)["run"]["fingerprint"]["server"]["cpu_model"] is None
+
+
+@pytest.mark.parametrize(
+    "runs,pairs", [(1, ["p1.u.r1"]), (2, ["p1.u.r1.1", "p1.u.r1.2"])]
+)
+def test_pair_id_names_the_reps_of_each_invocation(tmp_path, monkeypatch, runs, pairs):
+    r, cfg = client_runner(tmp_path, monkeypatch, runs=runs, pair_id="p1.u.r1")
+    s = cfg["test_groups"][0]["scenarios"][0]
+    proc = MetricsProcessor(SHA, False, False, "t", None, None, None, None)
+
+    def scenarios():
+        for n in range(1, runs + 1):
+            r.current_run = n
+            yield {
+                "scenario": s,
+                "group_id": 1,
+                "config_set": {},
+                "config_suffix": "default",
+            }
+
+    r.get_commit_time = lambda c: None
+    r._setup_profiling_and_metrics = lambda *a: (None, None, False)
+    r._finalize_metrics = lambda *a: None
+    r._iterate_test_groups_scenarios = scenarios
+    r._run_single_scenario = lambda *a: rows_for(proc, s)
+    r.run_benchmark_config()
+    assert [x["pair"] for x in written(tmp_path)["cells"][0]["runs"]] == pairs
+
+
+def test_rewrite_adds_server_facts_and_pairs_and_joins_one_build(tmp_path):
+    cfg = benchmark.load_configs(str(ROOT / "configs" / "sampler-smoke.json"))[0]
+    seen = vpb_result.server_side(
+        INFO, {"io-threads": "4"}, run=None, sha=SHA, instance_type="r7g.16xlarge"
+    )
+    facts = dict(
+        FACTS, server_host=seen["host"], server_cpus=None, build_info=seen["build_info"]
+    )
+    s = cfg["test_groups"][0]["scenarios"][0]
+    proc = MetricsProcessor(SHA, False, False, "t", None, None, None, None)
+    bad = proc.build_base_metadata(s["test"], 64, 1, 4, duration=15)
+    bad.update(status="failed", error="connect to 10.0.0.5:6379 refused")
+    files = []
+    for n, rows in ((1, rows_for(proc, s)), (2, [bad])):
+        doc, _ = emit(
+            "sampler-smoke.json",
+            cfg,
+            facts,
+            [{"scenario": s, "group": 1, "rows": rows}],
+        )
+        rep = doc["cells"][0]["runs"][0]
+        if "why" in rep:  # as a file written before errors were scrubbed says it
+            rep["why"] = "connect to 10.0.0.5 refused"
+        assert vpb_result.facts_of(doc["run"])["server_cpus"] is None
+        files.append(vpb_result.write_run(tmp_path / f"r{n}", doc))
+    sf = tmp_path / "server-facts.json"
+    sf.write_text(json.dumps({SHA: entry()}))
+    out = tmp_path / "out"
+    for n, f in enumerate(files, 1):
+        assert (
+            vpb_result.main(
+                [
+                    "rewrite",
+                    str(out),
+                    str(f),
+                    "--server-facts",
+                    str(sf),
+                    "--pair-id",
+                    f"p1.u.r{n}",
+                ]
+            )
+            == 0
+        )
+    doc = written(out)
+    fp = doc["run"]["fingerprint"]
+    assert (
+        schema.check_doc(doc, "x") == []
+        and list(idscan.scan(next((out / "vpb-runs").glob("*.json")))) == []
+    )
+    assert (
+        fp["server"] == entry()["host"]
+        and fp["pinning"] == "server CPUs 60-63, client CPUs 4-7"
+    )
+    assert (
+        doc["run"]["id"].endswith(fp["hash"][:8])
+        and doc["run"]["build"]["time"] == BUILD["time"]
+    )
+    reps = doc["cells"][0]["runs"]
+    assert [(x["rep"], x["pair"], x["ok"]) for x in reps] == [
+        (1, "p1.u.r1", True),
+        (2, "p1.u.r2", False),
+    ]
+    assert reps[1]["why"] == "connect to <server-ip> refused"
+    # a file whose build has no entry is refused, and nothing is written
+    sf.write_text(json.dumps({"a" * 40: entry()}))
+    with pytest.raises(SystemExit):
+        vpb_result.main(
+            [
+                "rewrite",
+                str(tmp_path / "none"),
+                str(files[0]),
+                "--server-facts",
+                str(sf),
+            ]
+        )
+    assert not (tmp_path / "none").exists()
+
+
+def test_facts_of_reads_back_the_facts_a_run_was_written_from():
+    doc, _ = emit(
+        "sampler-smoke.json",
+        benchmark.load_configs(str(ROOT / "configs" / "sampler-smoke.json"))[0],
+    )
+    assert vpb_result.facts_of(doc["run"]) == FACTS
+
+
+def test_server_facts_command_adds_one_build_to_the_file(tmp_path, monkeypatch):
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    body = "".join(f"{k}:{v}\r\n" for k, v in INFO.items()).encode()
+
+    def serve():
+        c, _ = srv.accept()
+        c.recv(64)
+        c.sendall(b"$%d\r\n%s\r\n" % (len(body), body))
+        c.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    assert vpb_result.local_info(srv.getsockname()[1]) == INFO
+    srv.close()
+    monkeypatch.setattr(vpb_result, "local_info", lambda port, host: INFO)
+    monkeypatch.setattr(vpb_result, "local_run", on_server)
+    f = tmp_path / "server-facts.json"
+    f.write_text(json.dumps({"a" * 40: entry()}))
+    assert (
+        vpb_result.main(["server-facts", str(f), "--sha", SHA, "--peer", "10.0.0.9"])
+        == 0
+    )
+    assert vpb_result.read_server_facts(f) == {"a" * 40: entry(), SHA: entry()}
+    with pytest.raises(SystemExit):
+        vpb_result.main(["server-facts", str(f), "--sha", "v9.0.0"])
