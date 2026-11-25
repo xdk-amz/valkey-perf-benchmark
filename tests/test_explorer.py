@@ -325,10 +325,24 @@ def test_compare_reproduces_the_4959_verdicts():
     plain = got["plain"]["counts"]
     # PR vs unstable, no TTLs: 69 of 71 cells pass (Fail / Pass / Exceed 2 / 60 / 9)
     assert (plain["fail"], plain["pass"], plain["exceed"]) == (2, 60, 9)
+    # by default the series are builds: the PR's head against its unstable merge-base, one run file each
     assert got["default"]["counts"] == plain and got["default"]["bar"] == [2, 20]
-    assert got["default"]["a"] == {"r": BASE_ID, "sl": "none"} and got["default"][
-        "b"
-    ] == {"r": PR_ID, "sl": "none"}
+    base, pr = load(BASE)["run"]["build"], load(PR)["run"]["build"]
+    assert got["default"]["a"] == {
+        "r": f"{base['repo']}@{base['sha']}",
+        "f": "set commands",
+        "sl": "none",
+    }
+    assert got["default"]["b"] == {
+        "r": f"{pr['repo']}@{pr['sha']}",
+        "f": "set commands",
+        "sl": "none",
+    }
+    assert got["plain"]["a"] == {
+        "r": BASE_ID,
+        "f": "set commands",
+        "sl": "none",
+    }  # a run file link still opens
     assert (
         got["plain"]["diff"] == []
     )  # same setup: the fingerprints differ only in the build
@@ -688,3 +702,120 @@ def test_history_shows_no_data_per_graph():
         g["hasData"] for g in got["p50"]["graphs"]
     )  # the fixture keeps server_ops only
     assert all(g["hasData"] for g in got["tps"]["graphs"])
+
+
+def as_build(doc, run_id, sha, factor, **client):
+    """A copy of a run as if made of another build (its ops scaled), and on another client when client is given."""
+    d = scaled(doc, run_id, {"ops": factor})
+    d["run"]["build"].update(sha=sha, ref="9.2.0")
+    d["run"]["fingerprint"]["client"].update(client)
+    return schema.finish(d)
+
+
+def split_run(doc, run_id, keep, **client):
+    """The cells keep() picks, as their own run on another client."""
+    d = copy.deepcopy(doc)
+    d["run"]["id"] = run_id
+    d["cells"] = [c for c in d["cells"] if keep(c)]
+    d["run"]["fingerprint"]["client"].update(client)
+    return schema.finish(d)
+
+
+@node
+def test_compare_a_build_takes_every_run_file_and_pairs_each_setup(tmp_path):
+    ci = load(CI1)
+    repo, sha = ci["run"]["build"]["repo"], ci["run"]["build"]["sha"]
+    # the CI commit at io-threads 1 and 9 against another build on the same two setups, faster at 1, slower at 9
+    b1 = as_build(ci, "b-iot1", "e" * 40, 1.5)
+    b9 = as_build(load(CI9), "b-iot9", "e" * 40, 0.5)
+    files = [CI1, CI9, *write(tmp_path, b1, b9)]
+    h = f"#a={repo}%40{sha}&af=continuous&b={repo}%40{'e' * 40}&bf=continuous"
+    got = harness("compare", {"builds": h, "files": f"#a={CI1_ID}&b=b-iot1"}, *files)
+    g = got["builds"]
+    assert g["runs"] == [2, 2] and g["roundTrip"]
+    assert sorted(g["setups"]) == [[CI1_ID, "b-iot1"], [CI9_ID, "b-iot9"]]
+    assert (g["counts"]["exceed"], g["counts"]["fail"], g["counts"]["notOnBoth"]) == (
+        12,
+        12,
+        0,
+    )
+    # a cell is one row per setup, never averaged across io-threads
+    assert {v for k, v in g["verdicts"].items() if "io-threads 1" in k} == {"exceed"}
+    assert {v for k, v in g["verdicts"].items() if "io-threads 9" in k} == {"fail"}
+    assert "get · pipeline 1 · io-threads 9" in g["rows"]
+    assert got["files"]["runs"] == [1, 1] and got["files"]["counts"]["exceed"] == 12
+
+
+@node
+def test_compare_a_build_split_over_clients_covers_every_cell(tmp_path):
+    ci = load(CI1)
+    small = lambda c: c["shape"]["size"] == 16  # noqa: E731
+    # each build ran its cells on two client types, the same cells on the same type
+    a1 = split_run(ci, "a-c8g", lambda c: not small(c), instance_type="c8g.4xlarge")
+    a2 = split_run(ci, "a-m8g", small, instance_type="m8g.4xlarge")
+    b1 = split_run(
+        as_build(ci, "b", "e" * 40, 0.5),
+        "b-c8g",
+        lambda c: not small(c),
+        instance_type="c8g.4xlarge",
+    )
+    b2 = split_run(
+        as_build(ci, "b", "e" * 40, 1.5), "b-m8g", small, instance_type="m8g.4xlarge"
+    )
+    # and the newer release changed default settings, so no setup matches exactly: each run pairs with the closest
+    for d in (b1, b2):
+        d["run"]["fingerprint"]["server_config"] = {"lazyfree-lazy-expire": "yes"}
+        schema.finish(d)
+    repo, sha = ci["run"]["build"]["repo"], ci["run"]["build"]["sha"]
+    h = f"#a={repo}%40{sha}&af=continuous&b={repo}%40{'e' * 40}&bf=continuous"
+    g = harness("compare", {"g": h}, *write(tmp_path, a1, a2, b1, b2))["g"]
+    assert g["diff"] == ["server_config"]
+    assert sorted(g["setups"]) == [["a-c8g", "b-c8g"], ["a-m8g", "b-m8g"]]
+    c = g["counts"]
+    assert (c["fail"], c["exceed"], c["notOnBoth"]) == (
+        8,
+        4,
+        0,
+    )  # all 12 cells on one page
+    assert not any(
+        "client" in r for r in g["rows"]
+    )  # no cell is on two clients: rows carry no setup
+
+
+@node
+def test_history_releases_collect_every_tag_in_version_order(tmp_path):
+    ci = load(CI1)
+
+    def tag(run_id, ref, sha, time, factor):
+        d = other_commit(ci, run_id, sha, time, "2026-11-25T10:00:00Z", factor)
+        d["run"]["build"]["ref"] = ref
+        return schema.finish(d)
+
+    # commit time and version disagree: 10.0.0 was tagged before 9.2.0
+    docs = [tag("r10", "10.0.0", "a" * 40, "2026-11-01T00:00:00Z", 1.2), tag("r92", "9.2.0", "b" * 40, "2026-11-10T00:00:00Z", 1.1),
+            tag("r81", "8.1.12", "c" * 40, "2026-11-05T00:00:00Z", 1.0), tag("rc", "9.2.0-rc1", "d" * 40, "2026-10-01T00:00:00Z", 1.0)]  # fmt: skip
+    rel = "valkey-io/valkey:*releases"
+    got = harness("history", {"rel": f"#b={rel.replace('/', '%2F')}&s=continuous", "ci": f"#b={UNSTABLE}&s=continuous"},
+                  CI1, *write(tmp_path, *docs))  # fmt: skip
+    r = got["rel"]
+    assert (
+        rel in r["branches"]
+        and "valkey-io/valkey:9.2.0" in r["branches"]
+        and r["roundTrip"]
+    )
+    assert [x[0] for x in r["commits"]] == [
+        "ccccccccc",
+        "ddddddddd",
+        "bbbbbbbbb",
+        "aaaaaaaaa",
+    ]
+    s = r["graphs"][0]["series"][0]
+    assert [p[0] for p in s["points"]] == [
+        "ccccccccc",
+        "ddddddddd",
+        "bbbbbbbbb",
+        "aaaaaaaaa",
+    ]  # one line through them
+    assert [x[0] for x in got["ci"]["commits"]] == [
+        "6c11c7fb2"
+    ]  # a branch is not a release

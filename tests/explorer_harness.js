@@ -37,11 +37,17 @@ const COMPARE = `(async () => {
       if (!(c.a && c.b)) { counts.notOnBoth++; continue; }
       counts[judge(c.a[m], c.b[m], m).status]++;
     }
-    const fa = fingerprint(docs[0].run), fb = fingerprint(docs[1].run);
+    const setups = setupsOf(docs);
+    const p = setups.find((x) => x.a && x.b) || setups[0];
+    const fa = p.a && fingerprint(p.a.run), fb = p.b && fingerprint(p.b.run);
     const back = parseHash(toHash(S));
-    out[name] = { a: S.a, b: S.b, tab: S.m, bar: S.bar, m, counts, fa: fa.hash, fb: fb.hash, hash: toHash(S),
-      roundTrip: JSON.stringify(back) === JSON.stringify(S),
-      diff: fingerprintDiff(fa, fb, ["repository", "commit", "build_version", "build_binary_sha256"]) };
+    const both = [...cells.values()].filter((c) => c.a && c.b);
+    out[name] = { a: S.a, b: S.b, tab: S.m, bar: S.bar, m, counts, fa: fa && fa.hash, fb: fb && fb.hash, hash: toHash(S),
+      roundTrip: JSON.stringify(back) === JSON.stringify(S), runs: [docs.a.length, docs.b.length],
+      setups: setups.map((x) => [x.a && x.a.run.id, x.b && x.b.run.id]),
+      rows: [...new Set(both.map((c) => c.row))].sort(),
+      verdicts: Object.fromEntries(both.map((c) => [c.ca.id + (c.row.includes("io-threads") ? " " + c.row : ""), judge(c.a[m], c.b[m], m).status])),
+      diff: fa && fb ? fingerprintDiff(fa, fb, ["repository", "commit", "build_version", "build_binary_sha256"]) : null };
   }
   return JSON.stringify(out);
 })()`;

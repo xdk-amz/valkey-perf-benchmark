@@ -7,19 +7,39 @@ let lastHash = "";
 
 // ---------- state <-> URL ----------
 const branchKey = (b) => `${b.repo}:${b.ref}`;
-const branchName = (k) => k.replace(":", " ");
-// branches with the most runs first, then the newest
+// a repo's releases: every run whose ref is a release tag, one point per release. "*" is not allowed in a git ref,
+// so the key names no branch.
+const RELEASES = "*releases";
+const releasesKey = (repo) => `${repo}:${RELEASES}`;
+const isReleases = (k) => k.endsWith(`:${RELEASES}`);
+// shortcut: a run file does not record whether its ref is a tag, so a ref shaped like a version (7.2.16, v8.1.0,
+// 9.0.0-rc1) counts as a release tag; read the ref's kind instead once run.build records it
+const isRelease = (ref) => /^v?\d+(\.\d+)+(-[\w.]+)?$/.test(ref);
+const branchName = (k) => (isReleases(k) ? `${k.slice(0, -RELEASES.length - 1)} releases` : k.replace(":", " "));
+const inBranch = (b, k) => (isReleases(k) ? releasesKey(b.repo) === k && isRelease(b.ref) : branchKey(b) === k);
+// 7.2.16 < 8.0.13 < 9.0.0-rc1 < 9.0.0
+function versionOrder(a, b) {
+  const parts = (r) => r.replace(/^v/, "").split("-");
+  const [x, xs] = parts(a), [y, ys] = parts(b);
+  const nx = x.split(".").map(Number), ny = y.split(".").map(Number);
+  for (let i = 0; i < Math.max(nx.length, ny.length); i++) if ((nx[i] || 0) !== (ny[i] || 0)) return (nx[i] || 0) - (ny[i] || 0);
+  return (xs === undefined) - (ys === undefined) || String(xs || "").localeCompare(String(ys || ""), "en", { numeric: true });
+}
+// branches, and each repo's releases, with the most runs first, then the newest
 function branchesAll() {
   const by = new Map();
-  for (const r of DATA.runs) {
-    const k = branchKey(r.build);
+  const add = (k, r) => {
     const e = by.get(k) || { k, n: 0, t: 0 };
     e.n++; e.t = Math.max(e.t, when(r.started));
     by.set(k, e);
+  };
+  for (const r of DATA.runs) {
+    add(branchKey(r.build), r);
+    if (isRelease(r.build.ref)) add(releasesKey(r.build.repo), r);
   }
   return [...by.values()].sort((a, b) => b.n - a.n || b.t - a.t || a.k.localeCompare(b.k)).map((e) => e.k);
 }
-const scenariosOn = (b) => families().filter((f) => DATA.runs.some((r) => branchKey(r.build) === b && r.families.includes(f)));
+const scenariosOn = (b) => families().filter((f) => DATA.runs.some((r) => inBranch(r.build, b) && r.families.includes(f)));
 function parseHash(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, ""));
   const bs = branchesAll();
@@ -34,28 +54,16 @@ function commit() {
   if (hsh !== location.hash) { lastHash = hsh; location.hash = hsh; }
   render();
 }
-const runsInView = () => DATA.runs.filter((r) => branchKey(r.build) === S.b && r.families.includes(S.s));
+const runsInView = () => DATA.runs.filter((r) => inBranch(r.build, S.b) && r.families.includes(S.s));
 
 // ---------- the model ----------
-const BUILD_FIELDS = ["repository", "commit", "build_version", "build_settings", "build_args", "build_binary_sha256"];
-const fieldLabel = (k, v) => `${k === "io_threads" ? "io-threads" : fieldName(k)} ${v == null ? "not recorded" : typeof v === "object" ? canonical(v) : v}`;
-// the setup fields that tell apart runs of one commit: a run's series carries their values
-function splitFields(docs) {
-  const vals = docs.map((d) => fingerprint(d.run).values);
-  const out = new Set();
-  docs.forEach((d, i) => docs.forEach((e, j) => {
-    if (j <= i || d.run.build.sha !== e.run.build.sha) return;
-    for (const k of Object.keys(vals[i])) if (!BUILD_FIELDS.includes(k) && canonical(vals[i][k] ?? null) !== canonical(vals[j][k] ?? null)) out.add(k);
-  }));
-  return FP.fields.map((f) => f.field).filter((k) => out.has(k));
-}
-
 // graphs (one per command row, as Single run's panels), series (shape, mix and setup) and points (one per run)
 function historyOf(docs, m) {
-  const split = splitFields(docs);
-  const setupOf = (d) => { const v = fingerprint(d.run).values; return split.map((k) => fieldLabel(k, v[k])).join(", "); };
+  const split = splitFields(docs, S.s);
+  const setupOf = (d) => setupLabel(d.run, split);
+  const releases = isReleases(S.b);
   const commits = [...new Map(docs.map((d) => [d.run.build.sha, d.run.build])).values()]
-    .sort((a, b) => when(a.time) - when(b.time) || a.sha.localeCompare(b.sha));
+    .sort((a, b) => (releases ? versionOrder(a.ref, b.ref) : 0) || when(a.time) - when(b.time) || a.sha.localeCompare(b.sha));
   const at = new Map(commits.map((b, i) => [b.sha, i]));
   const cs = docs.flatMap((d) => d.cells.filter((c) => c.family === S.s).map((c) => ({ c, d })));
   const varying = ROW_DIMS.filter(([, , get]) => new Set(cs.map((x) => get(x.c))).size > 1);
@@ -75,7 +83,7 @@ function historyOf(docs, m) {
     const s = c.metrics[m];
     if (!s) continue;
     const reps = c.runs.filter((r) => r.ok && r[m] != null).length;
-    sr.points.push({ x: at.get(d.run.build.sha), sha: d.run.build.sha, time: d.run.build.time, run: d.run.id, started: d.run.started,
+    sr.points.push({ x: at.get(d.run.build.sha), sha: d.run.build.sha, ref: d.run.build.ref, time: d.run.build.time, run: d.run.id, started: d.run.started,
       value: s.median, min: s.min, max: s.max, reps });
   }
   const out = [...graphs.values()].sort((a, b) => panelOrder(a.row, b.row)).map((g) => {
@@ -83,7 +91,7 @@ function historyOf(docs, m) {
     for (const s of series) s.points.sort((a, b) => a.x - b.x);
     return { ...g, series, hasData: series.some((s) => s.points.length) };
   });
-  return { commits, graphs: out, split, metric: m };
+  return { commits, graphs: out, split, metric: m, releases };
 }
 
 // ---------- graphs ----------
@@ -117,21 +125,22 @@ function graph(g, model) {
   }
   kids.push(svg("line", { class: "axis", x1: L, x2: W - R, y1: yb, y2: yb }));
   kids.push(svg("text", { class: "atitle", transform: `translate(11 ${TOP + PH / 2}) rotate(-90)`, "text-anchor": "middle" }, mlabel(m)));
+  const xlab = (b) => (model.releases ? b.ref : b.sha.slice(0, 9));
   model.commits.forEach((b, i) => kids.push(rot
-    ? svg("text", { class: "lab mono", transform: `translate(${X(i) + 3} ${yb + 8}) rotate(-50)`, "text-anchor": "end" }, b.sha.slice(0, 9))
-    : svg("text", { class: "lab mono", x: X(i), y: yb + 13, "text-anchor": "middle" }, b.sha.slice(0, 9))));
-  kids.push(svg("text", { class: "atitle", x: L + (W - L - R) / 2, y: H - 3, "text-anchor": "middle" }, "commit id"));
+    ? svg("text", { class: "lab mono", transform: `translate(${X(i) + 3} ${yb + 8}) rotate(-50)`, "text-anchor": "end" }, xlab(b))
+    : svg("text", { class: "lab mono", x: X(i), y: yb + 13, "text-anchor": "middle" }, xlab(b))));
+  kids.push(svg("text", { class: "atitle", x: L + (W - L - R) / 2, y: H - 3, "text-anchor": "middle" }, model.releases ? "release" : "commit id"));
   g.series.forEach((s, si) => {
     const color = colorOf(s);
     const off = (si - (ns - 1) / 2) * dx;
     const px = (p) => X(p.x) + off;
     if (s.points.length > 1) kids.push(svg("polyline", { class: "series", stroke: color, points: s.points.map((p) => `${px(p)},${Y(p.value)}`).join(" ") }));
     for (const p of s.points) {
-      const pt = svg("g", { class: "pt", tabindex: 0, role: "link", "aria-label": `${s.label}, ${p.sha.slice(0, 9)}: ${exact(p.value, md.unit)}, open the run` },
+      const pt = svg("g", { class: "pt", tabindex: 0, role: "link", "aria-label": `${s.label}, ${xlab(p)}: ${exact(p.value, md.unit)}, open the run` },
         svg("line", { class: "range", stroke: color, x1: px(p), x2: px(p), y1: Y(p.min), y2: Y(p.max) }),
         svg("circle", { class: "dot", fill: color, cx: px(p), cy: Y(p.value), r: 3.2 }),
         svg("circle", { class: "hit", cx: px(p), cy: Y(p.value), r: 8 }));
-      const show = (e) => showTip(e, s, p, md);
+      const show = (e) => showTip(e, s, p, md, model.releases);
       pt.addEventListener("mouseenter", show);
       pt.addEventListener("focus", show);
       pt.addEventListener("mouseleave", hideTip);
@@ -149,10 +158,10 @@ function graph(g, model) {
 const openRun = (p) => { location.href = `index.html#${new URLSearchParams({ s: S.s, run: p.run, m: S.m })}`; };
 
 // the small table a point shows
-function showTip(e, s, p, md) {
+function showTip(e, s, p, md, releases) {
   const tip = document.getElementById("tip");
   tip.replaceChildren(h("table", {}, h("caption", {}, s.label), h("tbody", {}, [
-    ["Commit", p.sha.slice(0, 9)], ["Commit time", p.time || "not recorded"], ["Run date", p.started ? p.started.slice(0, 10) : "not recorded"],
+    ...(releases ? [["Release", p.ref]] : []), ["Commit", p.sha.slice(0, 9)], ["Commit time", p.time || "not recorded"], ["Run date", p.started ? p.started.slice(0, 10) : "not recorded"],
     ["Median", exact(p.value, md.unit)], ["Min", exact(p.min, md.unit)], ["Max", exact(p.max, md.unit)], ["Reps", p.reps],
   ].map(([k, v]) => h("tr", {}, h("th", { scope: "row" }, k), h("td", {}, String(v)))))));
   tip.hidden = false;

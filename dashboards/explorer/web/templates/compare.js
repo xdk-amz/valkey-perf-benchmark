@@ -1,45 +1,73 @@
 /* Template: Compare. Series B against series A, cell by cell (TEMPLATES.md).
-   A series is a run file and, when the run's scenario declares a variable dimension (sliceOf), one value of it:
-   the slice. Cells match on their scenario and their cell id with the slice left out, so any two run files
-   compare; cells only one series has are listed once. */
+   A series is a build (every run file of one commit in one scenario) or one run file, and, when the scenario
+   declares a variable dimension (sliceOf), one value of it: the slice. Each cell of A pairs with B's cell of the
+   same scenario and cell id (the slice left out) from the run on the same setup, the fingerprint apart from the
+   build; cells only one series has are listed once. */
 "use strict";
 
 let S = null;
 let lastHash = "";
 
-const familyOf = (id) => (entry(id) ? entry(id).families[0] : null);
-const slicesOf = (id) => {
-  const sl = sliceOf(familyOf(id));
+// ---------- series ----------
+const buildKey = (b) => `${b.repo}@${b.sha}`;
+const BUILD_KEY = /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/;
+// a side is { r: a build key or a run id, f: its scenario, sl: its slice }
+const sideRuns = (side) => (entry(side.r) ? [entry(side.r)] : DATA.runs.filter((r) => buildKey(r.build) === side.r && r.families.includes(side.f)));
+const slicesOf = (side) => {
+  const sl = sliceOf(side.f);
   if (!sl) return [];
-  return [...entry(id).mixes].sort((a, b) => sl.order.indexOf(a) - sl.order.indexOf(b));
+  return [...new Set(sideRuns(side).flatMap((r) => r.mixes))].sort((a, b) => sl.order.indexOf(a) - sl.order.indexOf(b));
 };
-// B is the newest run of the first scenario off unstable; A is an unstable run of the same scenario, else another
+// every build of each scenario, newest first: [scenario, build key, its newest run]
+function buildsAll() {
+  const out = [];
+  for (const f of families()) {
+    const seen = new Set();
+    for (const r of runsOf(f)) {
+      const k = buildKey(r.build);
+      if (!seen.has(k)) { seen.add(k); out.push([f, k, r]); }
+    }
+  }
+  return out;
+}
+// B is the newest build of the first scenario off unstable; A another build on one of B's setups (the manifest's
+// setup facts), unstable first, else any other build
 function defaults() {
-  const rs = runsOf(families()[0]);
-  const b = rs.find((r) => r.build.ref !== "unstable") || rs[0];
-  const a = rs.find((r) => r.build.ref === "unstable" && r.id !== b.id) || rs.find((r) => r.id !== b.id) || b;
-  return { a: a.id, b: b.id };
+  const bs = buildsAll().filter(([f]) => f === families()[0]);
+  const b = bs.find(([, , r]) => r.build.ref !== "unstable") || bs[0];
+  const setup = (r) => JSON.stringify([r.fingerprint.io_threads, r.fingerprint.cores, r.fingerprint.server, r.fingerprint.client, r.fingerprint.network_path]);
+  const ofB = new Set(DATA.runs.filter((r) => buildKey(r.build) === b[1]).map(setup));
+  const near = bs.filter(([, k]) => k !== b[1] && DATA.runs.some((r) => buildKey(r.build) === k && ofB.has(setup(r))));
+  const a = near.find(([, , r]) => r.build.ref === "unstable") || near[0] ||
+    bs.find(([, k, r]) => r.build.ref === "unstable" && k !== b[1]) || bs.find(([, k]) => k !== b[1]) || b;
+  return { a: { r: a[1], f: a[0] }, b: { r: b[1], f: b[0] } };
 }
 function parseHash(hash) {
   const q = new URLSearchParams(hash.replace(/^#/, ""));
   const d = defaults();
-  const side = (rk, lk, def, slDefault) => {
-    const r = entry(q.get(rk)) ? q.get(rk) : def;
-    const sls = slicesOf(r);
+  const side = (rk, fk, lk, def, slDefault) => {
+    const r = q.get(rk), f = q.get(fk);
+    let x;
+    if (entry(r)) x = { r, f: entry(r).families[0] }; // one run file
+    else if (BUILD_KEY.test(r || "") && DATA.runs.some((e) => buildKey(e.build) === r && e.families.includes(f))) x = { r, f };
+    else x = def;
+    const sls = slicesOf(x);
     const sl = !sls.length ? null : sls.includes(q.get(lk)) ? q.get(lk) : sls.includes(slDefault) ? slDefault : sls[0];
-    return { r, sl };
+    return { ...x, sl };
   };
-  const a = side("a", "al", d.a, "none");
-  const b = side("b", "bl", d.b, a.sl); // B's slice defaults to A's
+  const a = side("a", "af", "al", d.a, "none");
+  const b = side("b", "bf", "bl", d.b, a.sl); // B's slice defaults to A's
   const cell = /^[0-9a-f]{8}$/.test(q.get("cell") || "") ? q.get("cell") : "";
   const num = (k) => { const v = Number(q.get(k)); return q.has(k) && Number.isFinite(v) && v >= 0 ? v : null; };
   return { a, b, m: parseTab(q), bar: [num("rel"), num("abs")], cell };
 }
 function toHash(st) {
-  const q = new URLSearchParams({ a: st.a.r });
-  if (st.a.sl) q.set("al", st.a.sl);
-  q.set("b", st.b.r);
-  if (st.b.sl) q.set("bl", st.b.sl);
+  const q = new URLSearchParams();
+  for (const k of ["a", "b"]) {
+    q.set(k, st[k].r);
+    if (!entry(st[k].r)) q.set(`${k}f`, st[k].f); // a run file names its scenario itself
+    if (st[k].sl) q.set(`${k}l`, st[k].sl);
+  }
   q.set("m", st.m || "tps");
   if (st.bar && st.bar[0] != null) { q.set("rel", st.bar[0]); q.set("abs", st.bar[1]); }
   if (st.cell) q.set("cell", st.cell);
@@ -55,24 +83,47 @@ function commit() {
 // a cell id with the slice value blanked wherever it is a segment (the set scenarios' ids carry the mix)
 const unslice = (id, sl) => (sl ? id.split(".").map((x) => (x === sl ? "*" : x)).join(".") : id);
 const seriesCells = (doc, side) => {
-  const fam = familyOf(side.r), sl = sliceOf(fam);
-  return doc.cells.filter((c) => c.family === fam && (!sl || c[sl.dim] === side.sl));
+  const sl = sliceOf(side.f);
+  return doc.cells.filter((c) => c.family === side.f && (!sl || c[sl.dim] === side.sl));
 };
 
-function cellsOf(docA, docB) {
-  const cs = { a: seriesCells(docA, S.a), b: seriesCells(docB, S.b) };
-  const all = [...cs.a, ...cs.b];
-  const varying = ROW_DIMS.filter(([, , get]) => new Set(all.map(get)).size > 1);
-  const rowOf = (c) => [c.command, ...varying.map(([, name, get]) => `${name} ${get(c)}`)].join(" · ");
+// The setups both series ran on: each of A's runs with B's run on the same setup (the fingerprint apart from the
+// build fields), then each run left with the other side's closest one (the fewest other fields apart), so two
+// releases whose default settings differ still pair by client, and any two run files compare. The Fingerprint
+// section names the fields each pair differs in.
+function setupsOf(docs) {
+  const skip = buildFields();
+  const vals = { a: docs.a.map((d) => fingerprint(d.run).values), b: docs.b.map((d) => fingerprint(d.run).values) };
+  const apart = (i, j) => FP.fields.filter((f) => !skip.includes(f.field) &&
+    canonical(vals.a[i][f.field] ?? null) !== canonical(vals.b[j][f.field] ?? null)).length;
+  const cand = docs.a.flatMap((_, i) => docs.b.map((_, j) => [apart(i, j), i, j])).sort((x, y) => x[0] - y[0] || x[1] - y[1] || x[2] - y[2]);
+  const ofA = new Map(), usedB = new Set();
+  for (const [, i, j] of cand) if (!ofA.has(i) && !usedB.has(j)) { ofA.set(i, j); usedB.add(j); }
+  return [...docs.a.map((d, i) => ({ a: d, b: ofA.has(i) ? docs.b[ofA.get(i)] : null })),
+    ...docs.b.filter((_, j) => !usedB.has(j)).map((d) => ({ a: null, b: d }))];
+}
+
+function cellsOf(docs) {
+  const setups = setupsOf(docs);
+  // runs of one build that hold the same cell on two setups (CI at io-threads 1 and 9) keep their rows apart
+  const split = [...new Set([...splitFields(docs.a, S.a.f), ...splitFields(docs.b, S.b.f)])];
+  const cs = setups.flatMap((p, g) => ["a", "b"].filter((k) => p[k]).flatMap((k) =>
+    seriesCells(p[k], S[k]).map((c) => ({ c, side: k, g, doc: p[k], setup: setupLabel(p.a ? p.a.run : p.b.run, split) }))));
+  const varying = ROW_DIMS.filter(([, , get]) => new Set(cs.map((x) => get(x.c))).size > 1);
+  const rowOf = (x) => [x.c.command, ...varying.map(([, name, get]) => `${name} ${get(x.c)}`), ...(x.setup ? [x.setup] : [])].join(" · ");
   const cells = new Map();
-  for (const side of ["a", "b"]) {
-    for (const c of cs[side]) {
-      const key = `${c.family}\u0001${unslice(c.id, S[side].sl)}`;
-      let x = cells.get(key);
-      if (!x) { x = { key, hash: fnv(key), row: rowOf(c), shape: shapeKey(c), a: null, b: null, ca: null, cb: null }; cells.set(key, x); }
-      x[side] = cellView(c);
-      x[`c${side}`] = c;
-    }
+  for (const x of cs) {
+    // a cell id is one cell per setup; one run file a side keeps its old key, so its cell links still open
+    const key = `${x.c.family}\u0001${unslice(x.c.id, S[x.side].sl)}${x.setup ? `\u0001${x.setup}` : ""}`;
+    const k = `${key}\u0001${x.g}`;
+    let y = cells.get(k);
+    if (!y) { y = { key, hash: fnv(key), row: rowOf(x), shape: shapeKey(x.c), a: null, b: null, ca: null, cb: null, da: null, db: null }; cells.set(k, y); }
+    // shortcut: two runs of one side on one setup holding the same cell keep the first; merge their reps if
+    // such runs are ever published apart
+    if (y[x.side]) continue;
+    y[x.side] = cellView(x.c);
+    y[`c${x.side}`] = x.c;
+    y[`d${x.side}`] = x.doc;
   }
   return cells;
 }
@@ -246,33 +297,39 @@ function notOnBoth(cells) {
       b.length ? h("tr", {}, h("th", { scope: "row" }, `Only on B (${b.length})`), h("td", {}, b.join(", "))) : null)));
 }
 
+const buildName = (b) => `${b.repo === "valkey-io/valkey" ? "" : `${b.repo} `}${b.ref} · ${b.sha.slice(0, 9)}`;
 const seriesLabel = (side) => {
-  const e = entry(side.r);
-  return [familyOf(side.r), runLabel(e), side.sl && sliceOf(familyOf(side.r)).label(side.sl)].filter(Boolean).join(" · ");
+  const e = entry(side.r), rs = sideRuns(side);
+  const name = e ? runLabel(e) : rs.length ? buildName(rs[0].build) : side.r;
+  return [side.f, name, side.sl && sliceOf(side.f).label(side.sl)].filter(Boolean).join(" · ");
 };
-function header(docA, docB) {
+// each setup both series ran on: the two runs' identity and fingerprints, and the fields they differ in
+function header(docs) {
   const id = (name, doc, sd) => {
+    if (!doc) return [`${name}: not on this setup`];
     const b = doc.run.build;
     return [`${name}: `, h("a", { href: `https://github.com/${b.repo}/tree/${b.ref}` }, `${b.repo} ${b.ref}`), " ",
       h("a", { href: `https://github.com/${b.repo}/commit/${b.sha}`, class: "mono" }, b.sha.slice(0, 9)),
-      sd.sl ? ` · ${sliceOf(familyOf(sd.r)).label(sd.sl)}` : "", ` · run ${doc.run.id}`];
+      sd.sl ? ` · ${sliceOf(sd.f).label(sd.sl)}` : "", ` · run ${doc.run.id}`];
   };
-  const fa = fingerprint(docA.run), fb = fingerprint(docB.run);
-  // the binary and its version follow the commit
-  const diff = fingerprintDiff(fa, fb, ["repository", "commit", "build_version", "build_binary_sha256"]);
   // a differing slice is named once; a scenario without slices has none to name
-  const sl = sliceOf(familyOf(S.a.r)) || sliceOf(familyOf(S.b.r));
+  const sl = sliceOf(S.a.f) || sliceOf(S.b.f);
   const same = ["repository", "commit", ...(sl && S.a.sl !== S.b.sl ? [sl.name] : [])];
   const sameText = same.length > 2 ? `${same.slice(0, -1).join(", ")} and ${same[same.length - 1]}` : same.join(" and ");
-  return [h("p", { class: "ids" }, id("A", docA, S.a), " · ", id("B", docB, S.b)),
-    fingerprintLine(fa, "A Benchmark Fingerprint"), fingerprintLine(fb, "B Benchmark Fingerprint"),
-    h("p", { class: "fp-match" }, diff.length
-      ? `Fingerprints differ beyond ${sameText}: ${diff.map(fieldName).join(", ")}`
-      : `Fingerprints match on every field except ${sameText}`)];
+  return setupsOf(docs).map((p) => {
+    const fa = p.a && fingerprint(p.a.run), fb = p.b && fingerprint(p.b.run);
+    // the binary and its version follow the commit
+    const diff = fa && fb ? fingerprintDiff(fa, fb, ["repository", "commit", "build_version", "build_binary_sha256"]) : [];
+    return h("div", { class: "fprun" }, h("p", { class: "ids" }, id("A", p.a, S.a), " · ", id("B", p.b, S.b)),
+      fa ? fingerprintLine(fa, "A Benchmark Fingerprint") : null, fb ? fingerprintLine(fb, "B Benchmark Fingerprint") : null,
+      fa && fb ? h("p", { class: "fp-match" }, diff.length
+        ? `Fingerprints differ beyond ${sameText}: ${diff.map(fieldName).join(", ")}`
+        : `Fingerprints match on every field except ${sameText}`) : null);
+  });
 }
 
 // ---------- cell detail ----------
-function renderCell(docs, m, cell) {
+function renderCell(m, cell) {
   const back = h("button", { type: "button", class: "back", onclick: () => { S.cell = ""; commit(); } }, "\u2190 Back to the comparison");
   if (!cell) return [back, h("p", {}, "This cell is not in the selected series.")];
   const j = judge(cell.a && cell.a[m], cell.b && cell.b[m], m);
@@ -307,7 +364,7 @@ function renderCell(docs, m, cell) {
       h("table", {}, h("thead", {}, h("tr", {}, ["Pair", "A", "B", "Change"].map((x, i) => h("th", { scope: "col", class: i ? "num" : "" }, x)))),
         h("tbody", {}, j.pairs.map((p) => h("tr", {}, h("th", { scope: "row" }, p.p), h("td", { class: "num" }, compact(p.a, unit)),
           h("td", { class: "num" }, compact(p.b, unit)), h("td", { class: "num" }, pctText(100 * (p.b / p.a - 1)))))))) : null,
-    h("div", { class: "sides" }, side("A", S.a, cell.a, cell.ca, docs[0]), side("B", S.b, cell.b, cell.cb, docs[1])))];
+    h("div", { class: "sides" }, side("A", S.a, cell.a, cell.ca, cell.da), side("B", S.b, cell.b, cell.cb, cell.db)))];
 }
 
 // ---------- render ----------
@@ -324,25 +381,31 @@ function renderSelectors(m) {
   const unit = DATA.metrics[m].bar[2];
   ia.previousElementSibling.textContent = `Bar (${unit})`;
   ia.step = unit === "ms" ? "0.01" : unit === "B" ? "1" : "5";
-  const all = families().flatMap((f) => runsOf(f).filter((r) => r.families[0] === f)).map((r) => r.id);
+  // a series is a build; a link to one run file keeps that file as its own choice
+  const builds = buildsAll().map(([f, k, r]) => [JSON.stringify({ r: k, f }), `${f} · ${buildName(r.build)}`]);
   for (const k of ["a", "b"]) {
-    fill(`sel-${k}-run`, all, S[k].r, (v) => `${familyOf(v)} · ${runLabel(entry(v))}`);
-    const sl = sliceOf(familyOf(S[k].r));
+    const el = document.getElementById(`sel-${k}-run`);
+    const run = entry(S[k].r) ? [[JSON.stringify({ r: S[k].r, f: S[k].f }), `${S[k].f} · ${runLabel(entry(S[k].r))}`]] : [];
+    el.replaceChildren(...[...run, ...builds].map(([v, label]) => h("option", { value: v }, label)));
+    el.value = JSON.stringify({ r: S[k].r, f: S[k].f });
+    const sl = sliceOf(S[k].f);
     const box = document.getElementById(`sel-${k}-slice`);
     box.closest("label").style.display = sl ? "" : "none";
     if (sl) {
-      fill(`sel-${k}-slice`, slicesOf(S[k].r), S[k].sl, sl.label);
+      fill(`sel-${k}-slice`, slicesOf(S[k]), S[k].sl, sl.label);
       box.previousElementSibling.textContent = `${k.toUpperCase()} ${sl.name}`;
     }
   }
 }
 
-// the comparison of the selected series: both run files, the metric, the matched cells
+// the comparison of the selected series: every run file of each, the metric, the matched cells
 async function compareState() {
-  const docs = await Promise.all([getRun(S.a.r), getRun(S.b.r)]);
-  const m = tabMetric(S.m, docs);
+  const load = (side) => Promise.all(sideRuns(side).map((r) => getRun(r.id)));
+  const [a, b] = await Promise.all([load(S.a), load(S.b)]);
+  const docs = { a, b };
+  const m = tabMetric(S.m, [...a, ...b]);
   if (S.bar[0] == null) S.bar = DATA.metrics[m].bar.slice(0, 2);
-  return { docs, m, cells: cellsOf(docs[0], docs[1]) };
+  return { docs, m, cells: cellsOf(docs) };
 }
 
 async function render() {
@@ -352,13 +415,13 @@ async function render() {
   renderSelectors(m);
   closeDrawer();
   const out = document.getElementById("out");
-  if (S.cell) out.replaceChildren(...renderCell(docs, m, [...cells.values()].find((c) => c.hash === S.cell)).filter(Boolean));
+  if (S.cell) out.replaceChildren(...renderCell(m, [...cells.values()].find((c) => c.hash === S.cell)).filter(Boolean));
   // the top: the comparison's title and the metric tabs; both runs' identity and fingerprints close the page
   else out.replaceChildren(...[h("section", { class: "block", id: "summary" },
     h("h2", { class: "run-title" }, `${seriesLabel(S.a)} vs ${seriesLabel(S.b)}`),
     tabBar(S.m, (tab) => { S.m = tab; S.bar = [null, null]; S.cell = ""; commit(); })),
     tally(cells, m), panels(cells, m), notOnBoth(cells),
-    h("section", { class: "block", id: "fingerprint" }, h("h2", {}, "Fingerprint"), header(docs[0], docs[1]))].filter(Boolean));
+    h("section", { class: "block", id: "fingerprint" }, h("h2", {}, "Fingerprint"), header(docs))].filter(Boolean));
 }
 
 function wire() {
@@ -372,8 +435,8 @@ function wire() {
   }
   for (const k of ["a", "b"]) {
     document.getElementById(`sel-${k}-run`).addEventListener("change", (e) => {
-      const r = e.target.value, sls = slicesOf(r);
-      S[k] = { r, sl: sls.includes(S[k].sl) ? S[k].sl : sls.includes("none") ? "none" : sls[0] || null }; S.cell = ""; commit();
+      const x = JSON.parse(e.target.value), sls = slicesOf(x);
+      S[k] = { ...x, sl: sls.includes(S[k].sl) ? S[k].sl : sls.includes("none") ? "none" : sls[0] || null }; S.cell = ""; commit();
     });
     document.getElementById(`sel-${k}-slice`).addEventListener("change", (e) => { S[k] = { ...S[k], sl: e.target.value }; S.cell = ""; commit(); });
   }

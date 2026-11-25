@@ -359,6 +359,27 @@ function fingerprintDiff(a, b, ignore) {
   return FP.fields.map((f) => f.field).filter((k) => !ignore.includes(k) && canonical(a.values[k] ?? null) !== canonical(b.values[k] ?? null));
 }
 
+// A run's setup: its fingerprint without the build fields. Runs of two builds on one setup compare cell by cell.
+const buildFields = () => FP.fields.filter((f) => f.group === "build").map((f) => f.field);
+function setupKey(run) {
+  const v = fingerprint(run).values, skip = buildFields();
+  return canonical(Object.fromEntries(FP.fields.map((f) => f.field).filter((k) => !skip.includes(k)).map((k) => [k, v[k] ?? null])));
+}
+const fieldLabel = (k, v) => `${k === "io_threads" ? "io-threads" : fieldName(k)} ${v == null ? "not recorded" : typeof v === "object" ? canonical(v) : v}`;
+// the setup fields that tell apart runs of one commit holding the same cell (CI at io-threads 1 and 9): a cell's
+// series or row carries their values, so those runs are never averaged
+function splitFields(docs, family) {
+  const vals = docs.map((d) => fingerprint(d.run).values);
+  const ids = docs.map((d) => new Set(d.cells.filter((c) => !family || c.family === family).map((c) => c.id)));
+  const skip = buildFields(), out = new Set();
+  docs.forEach((d, i) => docs.forEach((e, j) => {
+    if (j <= i || d.run.build.sha !== e.run.build.sha || ![...ids[i]].some((x) => ids[j].has(x))) return;
+    for (const k of Object.keys(vals[i])) if (!skip.includes(k) && canonical(vals[i][k] ?? null) !== canonical(vals[j][k] ?? null)) out.add(k);
+  }));
+  return FP.fields.map((f) => f.field).filter((k) => out.has(k));
+}
+const setupLabel = (run, split) => { const v = fingerprint(run).values; return split.map((k) => fieldLabel(k, v[k])).join(", "); };
+
 // load the run list, then hand over to the page's template
 function start(init) {
   load().then(init).catch((e) => {
