@@ -51,6 +51,43 @@ class TestSummarizeWindow:
             "window_complete": False,
         }
 
+    def test_missing_edge_uses_the_readings_inside_the_window(self):
+        # a slow command delayed the INFO replies of ticks 1 and 3
+        rows = [
+            _row(0, 0, {"sunion": 0}),
+            {"elapsed_sec": 1},
+            _row(2, 2_100_000, {"sunion": 100}),
+            {"elapsed_sec": 3},
+            _row(4, 4_100_000, {"sunion": 300}),
+            _row(5, 5_000_000, {"sunion": 390}),
+            {"elapsed_sec": 6},
+        ]
+        # no reading after the window: the client may have stopped inside it
+        assert summarize_window(rows, [1, 5]) == {
+            "window_sec": [1, 5],
+            "window_complete": False,
+        }
+
+        rows.append(_row(7, 7_000_000, {"sunion": 560}))
+        summary = summarize_window(rows, [1, 5])
+        assert summary["window_complete"] is True
+        assert summary["window_used_sec"] == [2, 5]
+        assert summary["server_ops_s"] == round(290 / 2.9, 2)
+
+    def test_readings_inside_too_short_or_load_stopped(self):
+        short = [
+            _row(2, 2_000_000, {"get": 1}),
+            _row(3, 3_000_000, {"get": 5}),
+            _row(9, 9_000_000, {"get": 9}),
+        ]
+        assert summarize_window(short, [1, 5])["window_complete"] is False
+        stopped = [
+            _row(1, 1_000_000, {"get": 1}),
+            _row(4, 4_000_000, {"get": 50}),
+            _row(7, 7_000_000, {"get": 50}),
+        ]
+        assert summarize_window(stopped, [1, 5])["window_complete"] is False
+
 
 class TestMissingCommands:
     def _runner(self, runner, reply):

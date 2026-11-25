@@ -29,8 +29,10 @@ from utils.cpu_utils import parse_core_range
 
 TICK_FIELDS = ("sample_time", "elapsed_sec")
 
-# Bounds every server read, so a tick can never hang and stop() can join.
-SOCKET_TIMEOUT_SEC = 2
+# Bounds every server read, so a tick can never hang and stop() can join. INFO waits its turn behind every
+# client, so under 50 clients of a slow command (SUNIONSTORE on two 100k-member sets takes about 35 ms) its
+# reply can take a few seconds; a shorter bound loses every reading of the window.
+SOCKET_TIMEOUT_SEC = 10
 
 
 def create_client(host: str, port: int, tls_kwargs: Dict[str, Any]) -> valkey.Valkey:
@@ -83,6 +85,12 @@ def summarize_window(rows: List[Dict[str, Any]], window: List[int]) -> Dict[str,
     own commands are excluded. ``window_complete`` is false when either edge
     reading is missing or no tick came after the end, which means the client
     stopped inside the window. Returns ``{}`` when no edge reading exists.
+
+    A slow command can delay a tick's INFO past its slot, so an edge reading
+    may be missing. The window then uses the first and last readings inside
+    it (``window_used_sec``), still divided by the server time between those
+    two replies, when they span at least 60% of the window and a later
+    reading shows the commands still running, so the client had not stopped.
     """
     start, end = window
     readings = {
@@ -91,8 +99,25 @@ def summarize_window(rows: List[Dict[str, Any]], window: List[int]) -> Dict[str,
         if isinstance(row.get("valkey_info"), dict)
     }
     last_tick = max((row["elapsed_sec"] for row in rows), default=-1)
+    used = None
     if start not in readings or end not in readings:
-        return {"window_sec": [start, end], "window_complete": False}
+        inside = sorted(t for t in readings if start <= t <= end)
+        later = sorted(t for t in readings if t > end)
+        if len(inside) < 2 or not later:
+            return {"window_sec": [start, end], "window_complete": False}
+        a, b = inside[0], inside[-1]
+        span = (
+            int(readings[b]["server_time_usec"]) - int(readings[a]["server_time_usec"])
+        ) / 1e6
+        total = lambda t: sum(
+            n
+            for c, n in _command_calls(readings[t]).items()
+            if c not in SAMPLER_COMMANDS
+        )
+        if span < 0.6 * (end - start) or total(later[0]) <= total(b):
+            return {"window_sec": [start, end], "window_complete": False}
+        used = [a, b]
+        start, end, last_tick = a, b, later[0]
     first, second = readings[start], readings[end]
     seconds = (int(second["server_time_usec"]) - int(first["server_time_usec"])) / 1e6
     if seconds <= 0:
@@ -109,9 +134,10 @@ def summarize_window(rows: List[Dict[str, Any]], window: List[int]) -> Dict[str,
     return {
         "server_ops_s": round(sum(by_command.values()), 2),
         "server_ops_s_by_command": by_command,
-        "window_sec": [start, end],
+        "window_sec": list(window),
         "window_complete": last_tick > end,
         "window_error_replies": errors,
+        **({"window_used_sec": used} if used else {}),
     }
 
 
