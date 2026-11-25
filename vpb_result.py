@@ -464,7 +464,8 @@ def build_info(
     info: Dict[str, Any], run: Optional[Run], executable: Optional[str], sha: str
 ) -> Dict[str, Any]:
     """The server build: its version and build settings from INFO, the binary's sha256, and the make
-    arguments VPB's builder stamped into the tree (valkey_build.py), read on the server's host.
+    arguments and SOURCE_DATE_EPOCH VPB's builder stamped into the tree (valkey_build.py), read on the server's
+    host.
     """
     settings = {
         k: str(info[src])
@@ -478,7 +479,7 @@ def build_info(
         )
         if info.get(src) not in (None, "")
     } or None
-    digest, args = None, None
+    digest, args, epoch = None, None, None
     exe = executable or info.get("executable")
     if run and exe:
         rc, out, _ = run(f"sha256sum {shlex.quote(str(exe))}", 60)
@@ -490,11 +491,15 @@ def build_info(
             f'cd {tree} && cat "$p" 2>/dev/null',
             30,
         )
-        m = re.match(r"^([0-9a-f]{40}) tls=(\w+) args=(.*)$", out.strip())
+        m = re.match(
+            r"^([0-9a-f]{40}) tls=(\w+)(?: sde=(\d*))? args=(.*)$", out.strip()
+        )
         if m and m.group(1) == sha:
-            args = [f"BUILD_TLS={m.group(2)}"] + m.group(3).split()
+            args = [f"BUILD_TLS={m.group(2)}"] + m.group(4).split()
+            epoch = int(m.group(3)) if m.group(3) else None
     return {
         "version": info.get("valkey_version") or info.get("redis_version"),
+        "source_date_epoch": epoch,
         "settings": settings,
         "args": args,
         "binary_sha256": digest,
@@ -672,7 +677,8 @@ def read_server_facts(path) -> Dict[str, Dict[str, Any]]:
             "host": {k: e["host"].get(k) for k in HOST_KEYS},
             "cpus": e["cpus"],
             "build_info": {
-                k: e["build_info"].get(k) for k in ("version", *schema.BUILD_FACT_KEYS)
+                k: e["build_info"].get(k)
+                for k in ("version", "source_date_epoch", *schema.BUILD_FACT_KEYS)
             },
             "time": e["time"],
         }
@@ -688,7 +694,11 @@ def with_server_facts(facts: Dict[str, Any], entry: Dict[str, Any]) -> Dict[str,
         raise ValueError(
             f"the server runs {b['version']}, its server facts say {e['version']}"
         )
-    for k in ("args", "binary_sha256"):  # read on the server's host
+    for k in (
+        "args",
+        "binary_sha256",
+        "source_date_epoch",
+    ):  # read on the server's host
         if e.get(k) is not None:
             b[k] = e[k]
     for k in ("version", "settings"):  # INFO's, unless it said nothing
@@ -907,6 +917,7 @@ def run_doc(
             "sha": build["sha"],
             "time": build.get("time"),
             "version": facts["build_info"].get("version"),
+            "source_date_epoch": facts["build_info"].get("source_date_epoch"),
         },
         "harness": {
             "repo": harness_["repo"],
@@ -938,7 +949,11 @@ def facts_of(run: Dict[str, Any]) -> Dict[str, Any]:
         "client_host": dict(fp["client"]),
         "server_cpus": cpus[0],
         "client_cpus": cpus[1],
-        "build_info": dict(fp["build"], version=run["build"].get("version")),
+        "build_info": dict(
+            fp["build"],
+            version=run["build"].get("version"),
+            source_date_epoch=run["build"].get("source_date_epoch"),
+        ),
         "server_config": fp["server_config"],
         "load_generator": fp["load_generator"],
         "network_path": fp["network_path"],
@@ -1235,7 +1250,7 @@ def matrix_runs(
             "server_cpus": server_cpus.get(cid),
             "client_cpus": client_cpus,
             "build_info": built.get("info")
-            or dict.fromkeys(("version", *schema.BUILD_FACT_KEYS)),
+            or dict.fromkeys(("version", "source_date_epoch", *schema.BUILD_FACT_KEYS)),
             "server_config": conf,
             "load_generator": versions.get(spec["generator"]),
             "network_path": network + (", TLS" if tls and "TLS" not in network else ""),

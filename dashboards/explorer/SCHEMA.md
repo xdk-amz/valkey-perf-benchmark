@@ -11,7 +11,7 @@ invocation with the same fingerprint adds its reps to the same file.
   "schema": "vpb-result",
   "run": {
     "id": "...", "data_set": "...", "started": "...", "finished": "...",
-    "build": {"repo": "...", "ref": "...", "sha": "...", "time": "...", "version": "..."},
+    "build": {"repo": "...", "ref": "...", "sha": "...", "time": "...", "version": "...", "source_date_epoch": 0},
     "harness": {"repo": "...", "sha": "...", "config": "...", "config_inline": null},
     "fingerprint": {"hash": "...", "build": {}, "server": {}, "client": {}, "server_config": {},
                     "load_generator": "...", "network_path": "...", "pinning": "...", "io_threads": 4, "cores": 4},
@@ -41,6 +41,7 @@ hardware, io-threads) are only in `run`, never in a cell.
 | `build.repo`, `build.ref`, `build.sha` | `owner/name`, the branch or tag, the 40-hex commit. |
 | `build.time` | Commit time. |
 | `build.version` | Server version from `INFO server`. |
+| `build.source_date_epoch` | The `SOURCE_DATE_EPOCH` the build was made with, from VPB's build stamp: the commit's committer time in Unix seconds. With it, and the checkout's path mapped out of the debug info, builds of one commit with one toolchain have one sha256 in any directory on any host. Null for a build VPB did not make. |
 | `harness.repo`, `harness.sha` | The VPB checkout that ran. |
 | `harness.config`, `harness.config_inline` | The config's path in the harness repo, and the config itself when the path does not say it all (overrides, a generated config). |
 | `fingerprint.hash` | The Benchmark Fingerprint (below). |

@@ -51,6 +51,7 @@ FACTS = {
     "client_cpus": "4-7",
     "build_info": {
         "version": "9.0.0",
+        "source_date_epoch": 1795031192,
         "settings": {"malloc": "jemalloc-5.3.0", "bits": "64"},
         "args": ["BUILD_TLS=no"],
         "binary_sha256": "e" * 64,
@@ -151,6 +152,7 @@ def test_every_scenario_config_writes_one_run_with_every_fact(name, tmp_path):
             doc["run"]["id"].startswith("2026-11-19-") and SHA[:9] in doc["run"]["id"]
         )
         assert doc["run"]["reproduce"].count("python benchmark.py") == 1
+        assert doc["run"]["build"]["source_date_epoch"] == 1795031192
 
 
 def test_a_fact_the_host_cannot_report_is_null():
@@ -529,8 +531,9 @@ def test_build_args_come_from_vpbs_build_stamp():
     def run(cmd, timeout=60, stdin=None):
         if cmd.startswith("sha256sum"):
             return 0, "f" * 64 + "  x\n", ""
-        return 0, f"{SHA} tls=no args=BUILD_EXT_STORAGE=yes\n", ""
+        return 0, stamp, ""
 
+    stamp = f"{SHA} tls=no sde=1795031192 args=BUILD_EXT_STORAGE=yes\n"
     binfo = vpb_result.build_info(
         {"valkey_version": "9.0.0", "mem_allocator": "libc"},
         run,
@@ -539,10 +542,16 @@ def test_build_args_come_from_vpbs_build_stamp():
     )
     assert binfo == {
         "version": "9.0.0",
+        "source_date_epoch": 1795031192,
         "settings": {"malloc": "libc"},
         "args": ["BUILD_TLS=no", "BUILD_EXT_STORAGE=yes"],
         "binary_sha256": "f" * 64,
     }
+    stamp = (
+        f"{SHA} tls=no args=\n"  # a tree built before the builder set SOURCE_DATE_EPOCH
+    )
+    binfo = vpb_result.build_info({}, run, "/v/src/valkey-server", SHA)
+    assert (binfo["args"], binfo["source_date_epoch"]) == (["BUILD_TLS=no"], None)
     binfo = vpb_result.build_info(
         {}, lambda *a, **k: (0, "", ""), "/v/src/valkey-server", SHA
     )
@@ -636,7 +645,7 @@ def on_server(cmd, timeout=60, stdin=None):
     if cmd.startswith("sha256sum"):
         return 0, "f" * 64 + "  x\n", ""
     if "vpb-build-stamp" in cmd:
-        return 0, f"{SHA} tls=no args=\n", ""
+        return 0, f"{SHA} tls=no sde=1795031192 args=\n", ""
     if cmd.startswith("git -C /v log"):
         return 0, "2026-11-18T10:00:00Z\n", ""
     return 1, "", ""
@@ -653,7 +662,8 @@ def test_server_facts_entry_round_trips_and_bad_files_are_refused(tmp_path):
         "2026-11-18T10:00:00Z",
         "Arm Neoverse-V1 r1p1",
     )
-    assert e["build_info"] == {"version": "9.0.0", "settings": {"malloc": "jemalloc-5.3.0", "bits": "64"},
+    assert e["build_info"] == {"version": "9.0.0", "source_date_epoch": 1795031192,
+                               "settings": {"malloc": "jemalloc-5.3.0", "bits": "64"},
                                "args": ["BUILD_TLS=no"], "binary_sha256": "f" * 64}  # fmt: skip
     f = tmp_path / "server-facts.json"
     f.write_text(
@@ -681,7 +691,8 @@ def test_server_facts_fill_what_info_alone_cannot_say():
     got = vpb_result.with_server_facts(facts, entry())
     assert got["server_host"] == entry()["host"] and got["server_cpus"] == "60-63"
     assert got["build_info"] == {"version": "9.0.0", "settings": {"malloc": "libc"},  # this server's INFO
-                                 "args": ["BUILD_TLS=no"], "binary_sha256": "f" * 64}  # fmt: skip
+                                 "source_date_epoch": 1795031192, "args": ["BUILD_TLS=no"],
+                                 "binary_sha256": "f" * 64}  # fmt: skip
     nodmi = dict(entry(), host=dict(entry()["host"], instance_type=None))
     assert (
         vpb_result.with_server_facts(facts, nodmi)["server_host"]["instance_type"]
@@ -901,3 +912,15 @@ def test_server_facts_command_adds_one_build_to_the_file(tmp_path, monkeypatch):
     assert vpb_result.read_server_facts(f) == {"a" * 40: entry(), SHA: entry()}
     with pytest.raises(SystemExit):
         vpb_result.main(["server-facts", str(f), "--sha", "v9.0.0"])
+
+
+def test_source_date_epoch_is_an_integer_or_null():
+    cfg = benchmark.load_configs(str(ROOT / "configs" / "sampler-smoke.json"))[0]
+    doc, _ = emit("sampler-smoke.json", cfg)
+    for ok in (1795031192, None):
+        doc["run"]["build"]["source_date_epoch"] = ok
+        assert schema.check_doc(doc, "x") == []
+    doc["run"]["build"]["source_date_epoch"] = "1795031192"
+    assert schema.check_doc(doc, "x") == [
+        "x: run.build.source_date_epoch is not an integer"
+    ]

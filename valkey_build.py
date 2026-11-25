@@ -1,6 +1,7 @@
 """Build Valkey from source for benchmarking."""
 
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -10,7 +11,7 @@ from typing import Iterable, List, Optional
 from utils.git_utils import resolve_ref
 
 # Name of the file, inside the Valkey tree's git dir, recording what the last
-# framework build compiled: commit, TLS mode and build_args.
+# framework build compiled: commit, TLS mode, SOURCE_DATE_EPOCH and build_args.
 BUILD_STAMP = "vpb-build-stamp"
 
 
@@ -30,13 +31,18 @@ class ServerBuilder:
         self.repo_url = "https://github.com/valkey-io/valkey.git"
         self.valkey_dir = Path(valkey_path)
 
-    def _run(self, command: Iterable[str], cwd: Optional[Path] = None) -> None:
+    def _run(
+        self,
+        command: Iterable[str],
+        cwd: Optional[Path] = None,
+        env: Optional[dict] = None,
+    ) -> None:
         """Execute a command with optional check and fail loudly if needed."""
         cmd_list = list(command)
         cmd_str = " ".join(command)
         logging.info(f"Running: {cmd_str}")
         try:
-            subprocess.run(cmd_list, check=True, cwd=cwd)
+            subprocess.run(cmd_list, check=True, cwd=cwd, env=env)
         except subprocess.CalledProcessError:
             logging.exception(
                 f"Command failed with CalledProcessError while running: {cmd_str}"
@@ -78,6 +84,26 @@ class ServerBuilder:
             return None
         return result.stdout.strip()
 
+    def source_date_epoch(self) -> Optional[str]:
+        """The checked-out commit's committer time in Unix seconds, the build's
+        SOURCE_DATE_EPOCH: mkreleasehdr.sh then puts it in the binary in place
+        of the build host and time, so every host builds the same bytes."""
+        epoch = self._git("log", "-1", "--format=%ct", "HEAD")
+        return epoch if epoch and epoch.isdigit() else None
+
+    def build_env(self) -> dict:
+        """make's environment: SOURCE_DATE_EPOCH, and the checkout's path mapped to '.' in the debug info (when
+        compiling and in the link, where LTO compiles again), so two builds of one commit give one binary wherever
+        they are made."""
+        env = dict(os.environ)
+        epoch = self.source_date_epoch()
+        if epoch:
+            env["SOURCE_DATE_EPOCH"] = epoch
+        prefix_map = f"-ffile-prefix-map={self.valkey_dir.resolve()}=."
+        for flags in ("CFLAGS", "LDFLAGS"):
+            env[flags] = f"{env.get(flags, '')} {prefix_map}".strip()
+        return env
+
     def _build_stamp(self) -> Optional[str]:
         """Describe what a build of the tree as it is now would be.
 
@@ -89,7 +115,8 @@ class ServerBuilder:
         if not head or dirty is None or dirty:
             return None
         args = " ".join(self.build_args)
-        return f"{head} tls={'yes' if self.tls_mode else 'no'} args={args}\n"
+        tls = "yes" if self.tls_mode else "no"
+        return f"{head} tls={tls} sde={self.source_date_epoch() or ''} args={args}\n"
 
     def _stamp_file(self) -> Optional[Path]:
         """Return where the last build's stamp lives, inside the tree's git dir."""
@@ -116,14 +143,19 @@ class ServerBuilder:
             return
 
         logging.info(f"Building with TLS {'enabled' if self.tls_mode else 'disabled'}")
-        self._run(["make", "distclean"], cwd=self.valkey_dir)
+        env = self.build_env()
+        # every make, distclean too: the Makefile writes release.h whenever it is read, and a
+        # later make keeps a release.h whose commit matches
+        self._run(["make", "distclean"], cwd=self.valkey_dir, env=env)
         if self.tls_mode:
             self._run(
-                ["make", "BUILD_TLS=yes", *self.build_args, "-j"], cwd=self.valkey_dir
+                ["make", "BUILD_TLS=yes", *self.build_args, "-j"],
+                cwd=self.valkey_dir,
+                env=env,
             )
             self._run(["./utils/gen-test-certs.sh"], cwd=self.valkey_dir)
         else:
-            self._run(["make", *self.build_args, "-j"], cwd=self.valkey_dir)
+            self._run(["make", *self.build_args, "-j"], cwd=self.valkey_dir, env=env)
 
         # _run logs failures instead of raising, so stamp only a build that
         # produced a server binary.

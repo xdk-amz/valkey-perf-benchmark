@@ -71,7 +71,9 @@ def _build_count(path, builds):
         with (
             patch.object(builder, "clone_and_checkout"),
             patch.object(
-                builder, "_run", side_effect=lambda cmd, cwd=None: made.append(cmd)
+                builder,
+                "_run",
+                side_effect=lambda cmd, cwd=None, env=None: made.append(cmd),
             ),
         ):
             builder.build()
@@ -111,3 +113,33 @@ class TestBuildSkip:
         _git_tree(tmp_path)
         (tmp_path / "src" / "valkey-server").unlink()
         assert _build_count(tmp_path, [None, None]) == 2
+
+
+def test_make_runs_with_the_commits_source_date_epoch_and_stamps_it(tmp_path):
+    import subprocess
+
+    _git_tree(tmp_path)
+    epoch = subprocess.run(
+        ["git", "log", "-1", "--format=%ct"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    builder = ServerBuilder(commit_id="HEAD", tls_mode=False, valkey_path=str(tmp_path))
+    made = []
+    with (
+        patch.object(builder, "clone_and_checkout"),
+        patch.object(
+            builder,
+            "_run",
+            side_effect=lambda cmd, cwd=None, env=None: made.append((cmd, env)),
+        ),
+    ):
+        builder.build()
+    envs = [e for cmd, e in made if cmd[0] == "make"]
+    assert [cmd for cmd, _ in made] == [["make", "distclean"], ["make", "-j"]]
+    assert all(e["SOURCE_DATE_EPOCH"] == epoch and e["PATH"] for e in envs)
+    prefix_map = f"-ffile-prefix-map={tmp_path.resolve()}=."
+    assert all(e[f].endswith(prefix_map) for e in envs for f in ("CFLAGS", "LDFLAGS"))
+    stamp = (tmp_path / ".git" / "vpb-build-stamp").read_text()
+    assert f" sde={epoch} " in stamp

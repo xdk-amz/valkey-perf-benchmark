@@ -18,7 +18,7 @@ RUN_KEYS = {
     "fingerprint",
     "reproduce",
 }
-BUILD_KEYS = {"repo", "ref", "sha", "time", "version"}
+BUILD_KEYS = {"repo", "ref", "sha", "time", "version", "source_date_epoch"}
 HARNESS_KEYS = {"repo", "sha", "config", "config_inline"}
 HOST_KEYS = (
     "instance_type",
@@ -109,6 +109,9 @@ def _check_run(run: Dict[str, Any], name: str) -> List[str]:
         errors += _keys(fp[side], HOST_KEYS, f"{name} run.fingerprint.{side}")
     if not SHA.match(str(run["build"]["sha"])):
         errors.append(f"{name}: run.build.sha is not 40 hex")
+    sde = run["build"]["source_date_epoch"]
+    if sde is not None and (not isinstance(sde, int) or isinstance(sde, bool)):
+        errors.append(f"{name}: run.build.source_date_epoch is not an integer")
     for k in ("server_config",):
         if fp[k] is not None and not isinstance(fp[k], dict):
             errors.append(f"{name}: run.fingerprint.{k} is not an object")
